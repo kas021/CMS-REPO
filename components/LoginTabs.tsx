@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { CompanyLogoIcon, UserCircleIcon, LockClosedIcon } from './icons';
 import { AppRole } from '../types';
-import { API_BASE_URL } from '../utils/api';
+import { getApiBaseUrl } from '../utils/api';
 
 type AuthenticatedUser = {
     id: number;
@@ -11,26 +11,30 @@ type AuthenticatedUser = {
 
 interface LoginTabsProps {
     onLogin: (token: string, user: AuthenticatedUser) => void;
+    backendError?: string | null;
+    isCheckingBackend?: boolean;
 }
 
 type LoginTab = 'admin' | 'driver' | 'customer';
 
-const LoginTabs: React.FC<LoginTabsProps> = ({ onLogin }) => {
+const LoginTabs: React.FC<LoginTabsProps> = ({ onLogin, backendError, isCheckingBackend }) => {
     const [activeTab, setActiveTab] = useState<LoginTab>('admin');
-    const [backendUrl, setBackendUrl] = useState(API_BASE_URL);
+    const [backendUrl, setBackendUrl] = useState(() => getApiBaseUrl());
 
     const handleUrlSave = (e: React.FormEvent) => {
         e.preventDefault();
-        localStorage.setItem('backend_url', backendUrl);
-        window.location.reload();
+        if (typeof window !== 'undefined') {
+            window.localStorage.setItem('backend_url', backendUrl);
+            window.location.reload();
+        }
     };
 
     const renderForm = () => {
         switch (activeTab) {
             case 'admin':
-                return <LoginForm key="admin" role="admin" onLogin={onLogin} />;
+                return <LoginForm key="admin" role="admin" onLogin={onLogin} isCheckingBackend={isCheckingBackend} />;
             case 'driver':
-                return <LoginForm key="driver" role="driver" onLogin={onLogin} />;
+                return <LoginForm key="driver" role="driver" onLogin={onLogin} isCheckingBackend={isCheckingBackend} />;
             case 'customer':
                 return (
                     <div className="text-center p-8">
@@ -58,7 +62,12 @@ const LoginTabs: React.FC<LoginTabsProps> = ({ onLogin }) => {
                     </nav>
                 </div>
                 
-                <div className="p-8">
+                <div className="p-8 space-y-4">
+                    {backendError && (
+                        <div className="p-3 bg-red-50 border border-red-200 rounded-md text-sm text-red-700 text-center">
+                            {backendError}
+                        </div>
+                    )}
                     {renderForm()}
                 </div>
             </div>
@@ -87,42 +96,112 @@ const LoginTabs: React.FC<LoginTabsProps> = ({ onLogin }) => {
 interface LoginFormProps {
     role: 'admin' | 'driver';
     onLogin: (token: string, user: AuthenticatedUser) => void;
+    isCheckingBackend?: boolean;
 }
 
-const LoginForm: React.FC<LoginFormProps> = ({ role, onLogin }) => {
+const LoginForm: React.FC<LoginFormProps> = ({ role, onLogin, isCheckingBackend }) => {
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
+
+    const decodeJwtPayload = (tokenValue: string): Record<string, unknown> => {
+        const parts = tokenValue.split('.');
+        if (parts.length < 2) {
+            throw new Error('Invalid token format.');
+        }
+        let payloadPart = parts[1];
+        payloadPart = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+        while (payloadPart.length % 4 !== 0) {
+            payloadPart += '=';
+        }
+        return JSON.parse(atob(payloadPart));
+    };
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError(null);
         setIsLoading(true);
 
-        // MOCK API call. In a real app, this would be a fetch to the backend.
-        setTimeout(() => {
-            if (role === 'admin') {
-                if (username === 'sadmin' && password === 'London777') {
-                    const token = `header.${btoa(JSON.stringify({ sub: 'sadmin', role: 'super_admin' }))}.signature`;
-                    onLogin(token, { id: 0, username: 'sadmin', role: 'super_admin' });
-                } else if (username === 'admin' && password === 'password') {
-                    const token = `header.${btoa(JSON.stringify({ sub: 'admin', role: 'admin' }))}.signature`;
-                    onLogin(token, { id: 1, username: 'admin', role: 'admin' });
-                } else {
-                    setError('Invalid admin username or password.');
+        const baseUrl = getApiBaseUrl();
+        const endpoint = role === 'admin' ? '/token' : '/drivers/login';
+        const formData = new URLSearchParams();
+        formData.append('username', username);
+        formData.append('password', password);
+
+        try {
+            const response = await fetch(`${baseUrl}${endpoint}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: formData.toString(),
+            });
+
+            if (!response.ok) {
+                let message = 'Login failed. Please check your credentials and try again.';
+                try {
+                    const data = await response.json();
+                    if (typeof data.detail === 'string') {
+                        message = data.detail;
+                    }
+                } catch {
+                    // ignore JSON parsing errors for error responses
                 }
-            } else if (role === 'driver') {
-                // Mocking a successful driver login
-                if (password === 'password123') {
-                     const token = `header.${btoa(JSON.stringify({ sub: username, role: 'driver', sub_id: 10 }))}.signature`;
-                     onLogin(token, { id: 10, username: username, role: 'driver' });
-                } else {
-                    setError('Invalid driver username or password.');
+                throw new Error(message);
+            }
+
+            const data = await response.json();
+            const token: string | undefined = data?.access_token;
+            if (!token) {
+                throw new Error('No access token received from the backend.');
+            }
+
+            let payload: { [key: string]: unknown };
+            try {
+                payload = decodeJwtPayload(token);
+            } catch {
+                throw new Error('Received an invalid token from the backend.');
+            }
+
+            const payloadRole = typeof payload.role === 'string' ? payload.role : role;
+            const userRole: AppRole = payloadRole === 'driver' ? 'driver' : 'admin';
+            const rawId = payload.sub_id ?? payload.sub;
+            const parsedId = typeof rawId === 'number' ? rawId : Number(rawId);
+            let userId = Number.isFinite(parsedId) ? Number(parsedId) : 0;
+            let usernameFromPayload = typeof payload.sub === 'string' ? payload.sub : username;
+
+            if (userRole === 'driver') {
+                try {
+                    const profileResponse = await fetch(`${baseUrl}/drivers/me`, {
+                        headers: { Authorization: `Bearer ${token}` },
+                    });
+                    if (profileResponse.ok) {
+                        const profile = await profileResponse.json();
+                        if (typeof profile?.id === 'number') {
+                            userId = profile.id;
+                        }
+                        if (typeof profile?.email === 'string') {
+                            usernameFromPayload = profile.email;
+                        }
+                    }
+                } catch (profileError) {
+                    console.warn('Unable to load driver profile', profileError);
                 }
             }
+
+            onLogin(token, { id: userId, username: usernameFromPayload, role: userRole });
+        } catch (err) {
+            if (err instanceof TypeError) {
+                setError(`Unable to reach backend at ${baseUrl}. Please ensure it is running.`);
+            } else if (err instanceof Error) {
+                setError(err.message);
+            } else {
+                setError('Login failed. Please try again.');
+            }
+        } finally {
             setIsLoading(false);
-        }, 1000);
+        }
     };
 
     const isDriver = role === 'driver';
@@ -150,8 +229,8 @@ const LoginForm: React.FC<LoginFormProps> = ({ role, onLogin }) => {
                 {error && <div className="p-3 bg-red-50 border border-red-200 rounded-md"><p className="text-sm text-red-700">{error}</p></div>}
 
                 <div>
-                    <button type="submit" disabled={isLoading} className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-brand-blue hover:bg-brand-blue-light focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-blue-dark disabled:bg-brand-gray-400">
-                        {isLoading ? 'Signing in...' : 'Sign in'}
+                    <button type="submit" disabled={isLoading || isCheckingBackend} className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-brand-blue hover:bg-brand-blue-light focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-blue-dark disabled:bg-brand-gray-400">
+                        {isCheckingBackend ? 'Checking backend...' : isLoading ? 'Signing in...' : 'Sign in'}
                     </button>
                 </div>
             </form>

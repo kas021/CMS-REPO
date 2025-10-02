@@ -1,6 +1,16 @@
-// Read the backend URL from localStorage.
-const storedUrl = localStorage.getItem('backend_url');
+const DEFAULT_BACKEND_URL = 'http://localhost:8000';
 
-// If a URL is stored, use it. Otherwise, default to localhost:8000.
-// This allows the backend URL to be configured at runtime from the login screen.
-export const API_BASE_URL = storedUrl || 'http://localhost:8000';
+export const getApiBaseUrl = (): string => {
+    if (typeof window === 'undefined') {
+        return DEFAULT_BACKEND_URL;
+    }
+
+    const storedUrl = window.localStorage.getItem('backend_url');
+    if (storedUrl && storedUrl.trim().length > 0) {
+        return storedUrl.trim();
+    }
+
+    return DEFAULT_BACKEND_URL;
+};
+
+export const API_BASE_URL = getApiBaseUrl();

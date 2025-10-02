@@ -17,6 +17,7 @@ import { MOCK_JOBS, MOCK_CUSTOMERS, MOCK_DRIVERS, MOCK_INVOICES, MOCK_CREDIT_NOT
 import { PlusIcon, TruckIcon, DocumentChartBarIcon, HomeIcon, BuildingOffice2Icon, InformationCircleIcon, CreditCardIcon, DocumentTextIcon, FolderIcon, ReceiptRefundIcon, UserCircleIcon } from './components/icons';
 import { COMPANY_DETAILS as INITIAL_COMPANY_DETAILS, DEFAULT_INVOICE_TEMPLATE } from './constants';
 import { safeParseDate, parsePaymentTermDays } from './utils/date';
+import { getApiBaseUrl } from './utils/api';
 import LoginTabs from './components/LoginTabs';
 import ProfilePage from './components/ProfilePage';
 import AccessDeniedPage from './components/AccessDeniedPage';
@@ -49,6 +50,8 @@ const App: React.FC = () => {
     const [companyDetails, setCompanyDetails] = useState<CompanyDetails>(INITIAL_COMPANY_DETAILS);
     const [invoiceTemplates, setInvoiceTemplates] = useState<InvoiceTemplateSettings[]>([DEFAULT_INVOICE_TEMPLATE]);
     const [activeTemplateId, setActiveTemplateId] = useState<string>(DEFAULT_INVOICE_TEMPLATE.id);
+    const [backendError, setBackendError] = useState<string | null>(null);
+    const [isCheckingBackend, setIsCheckingBackend] = useState(false);
 
     // Click handler state for avatar
     const clickCount = useRef(0);
@@ -102,6 +105,40 @@ const App: React.FC = () => {
         verifyToken();
     }, []);
 
+    useEffect(() => {
+        let isMounted = true;
+        const controller = new AbortController();
+
+        const checkBackendHealth = async () => {
+            setIsCheckingBackend(true);
+            const baseUrl = getApiBaseUrl();
+            try {
+                const response = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+                if (!response.ok) {
+                    throw new Error(`Unexpected status: ${response.status}`);
+                }
+                if (isMounted) {
+                    setBackendError(null);
+                }
+            } catch (error) {
+                if (isMounted && !controller.signal.aborted) {
+                    setBackendError(`Unable to reach backend at ${baseUrl}. Please ensure it is running.`);
+                }
+            } finally {
+                if (isMounted && !controller.signal.aborted) {
+                    setIsCheckingBackend(false);
+                }
+            }
+        };
+
+        checkBackendHealth();
+
+        return () => {
+            isMounted = false;
+            controller.abort();
+        };
+    }, []);
+
 
     const handleLogin = (token: string, loggedInUser: AuthenticatedUser) => {
         if (loggedInUser.role === 'driver') {
@@ -111,6 +148,7 @@ const App: React.FC = () => {
         }
         setUser(loggedInUser);
         setAuthStatus('authenticated');
+        setBackendError(null);
     };
 
     const handleLogout = () => {
@@ -153,13 +191,19 @@ const App: React.FC = () => {
         }
         return tabs;
     }, [tabs, user]);
-    
+
     const isTabAccessAllowed = (type: TabType): boolean => {
         if (user?.role === 'admin') {
             return type !== 'company-data' && type !== 'system-stats';
         }
         return true;
     };
+
+    const backendStatusBanner = backendError ? (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-2 text-center">
+            {backendError}
+        </div>
+    ) : null;
 
 
     const handleAddTab = useCallback((type: TabType = 'start') => {
@@ -669,16 +713,22 @@ const App: React.FC = () => {
     }
 
     if (authStatus === 'unauthenticated') {
-        return <LoginTabs onLogin={handleLogin} />;
+        return <LoginTabs onLogin={handleLogin} backendError={backendError} isCheckingBackend={isCheckingBackend} />;
     }
 
     if (user?.role === 'driver') {
-        return <DriverDashboard user={user} onLogout={handleLogout} />;
+        return (
+            <>
+                {backendStatusBanner}
+                <DriverDashboard user={user} onLogout={handleLogout} />
+            </>
+        );
     }
 
     return (
         <div className="flex flex-col h-screen font-sans antialiased text-brand-gray-900">
             <style>{`@keyframes avatar-pop { 0% { transform: scale(1); box-shadow: 0 0 0 rgba(240, 173, 78, 0.4); } 50% { transform: scale(1.1) rotate(10deg); box-shadow: 0 0 20px rgba(240, 173, 78, 0.8); } 100% { transform: scale(1); box-shadow: 0 0 0 rgba(240, 173, 78, 0.4); } } .avatar-animate { animation: avatar-pop 0.5s ease-in-out; }`}</style>
+            {backendStatusBanner}
              <VersionModal isOpen={isVersionModalOpen} onClose={() => setIsVersionModalOpen(false)} version={APP_VERSION} onShowHistory={handleShowVersionHistory} />
             <header className="bg-white shadow-sm">
                  <div className="flex items-center justify-between px-4 py-2 border-b border-brand-gray-200">
