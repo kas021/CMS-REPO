@@ -1,4 +1,5 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
+
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -23,8 +24,15 @@ def login_for_access_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect credentials")
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(admin.email, Role.ADMIN, access_token_expires)
-    return AdminToken(access_token=access_token)
+    expires_at = datetime.utcnow() + access_token_expires
+    access_token = create_access_token(
+        admin.email,
+        Role.ADMIN,
+        subject_id=admin.id,
+        expires_delta=access_token_expires,
+    )
+    return AdminToken(access_token=access_token, expires_at=expires_at)
+
 
 
 @router.post("/drivers/login", response_model=DriverToken, summary="Driver login")
@@ -38,5 +46,12 @@ def driver_login(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Driver inactive")
 
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(driver.email, Role.DRIVER, access_token_expires)
-    return DriverToken(access_token=access_token)
+    expires_at = datetime.utcnow() + access_token_expires
+    access_token = create_access_token(
+        driver.email,
+        Role.DRIVER,
+        subject_id=driver.id,
+        expires_delta=access_token_expires,
+    )
+    return DriverToken(access_token=access_token, expires_at=expires_at)
+
