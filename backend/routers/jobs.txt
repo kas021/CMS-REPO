@@ -1,0 +1,84 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from datetime import datetime
+
+from .. import crud, schemas
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/jobs",
+    tags=["Jobs"],
+)
+
+@router.post("/", response_model=schemas.Job)
+def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
+    # Check if customer exists
+    customer = crud.get_customer(db, customer_id=job.customerId)
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"Customer with id {job.customerId} not found")
+    return crud.create_job(db=db, job=job)
+
+@router.get("/", response_model=List[schemas.Job])
+def read_jobs(
+    skip: int = 0,
+    limit: int = 100,
+    search: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    main_source: Optional[str] = None,
+    customer_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    jobs = crud.get_jobs(
+        db, 
+        skip=skip, 
+        limit=limit, 
+        search=search, 
+        start_date=start_date, 
+        end_date=end_date, 
+        main_source=main_source, 
+        customer_id=customer_id
+    )
+    return jobs
+
+@router.get("/{job_id}", response_model=schemas.Job)
+def read_job(job_id: int, db: Session = Depends(get_db)):
+    db_job = crud.get_job(db, job_id=job_id)
+    if db_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return db_job
+    
+@router.put("/{job_id}", response_model=schemas.Job)
+def update_job(job_id: int, job: schemas.JobUpdate, db: Session = Depends(get_db)):
+    db_job = crud.update_job(db, job_id=job_id, job_update=job)
+    if db_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return db_job
+
+@router.delete("/{job_id}", response_model=schemas.Job)
+def delete_job(job_id: int, db: Session = Depends(get_db)):
+    db_job = crud.delete_job(db, job_id=job_id)
+    if db_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return db_job
+
+@router.post("/{job_id}/assign_driver", response_model=schemas.Job)
+def assign_driver(job_id: int, payload: schemas.AssignDriverPayload, db: Session = Depends(get_db)):
+    db_job = crud.assign_driver_to_job(db, job_id=job_id, driver_id=payload.driver_id)
+    if db_job is None:
+        raise HTTPException(status_code=404, detail="Job or Driver not found")
+    return db_job
+
+@router.post("/{job_id}/complete", response_model=schemas.Invoice)
+def complete_job(job_id: int, db: Session = Depends(get_db)):
+    job, invoice = crud.complete_job_and_create_invoice(db, job_id=job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not invoice:
+        # This could happen if invoice creation fails or if it already exists and something is wrong
+        existing_invoice = crud.get_invoice(db, job.invoice.id if job.invoice else -1)
+        if existing_invoice:
+            return existing_invoice
+        raise HTTPException(status_code=500, detail="Failed to create or retrieve invoice")
+    return invoice

@@ -1,0 +1,140 @@
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+import random
+import os
+
+# This setup allows running the script directly from the `backend` directory
+import sys
+# Add the parent directory (project root) to the Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from backend.database import SessionLocal, engine
+from backend import models, crud, schemas
+
+# Create tables
+models.Base.metadata.create_all(bind=engine)
+
+db: Session = SessionLocal()
+
+def seed_data():
+    print("Seeding database...")
+
+    # Clean up existing data
+    db.query(models.CreditNoteApplication).delete()
+    db.query(models.CreditNote).delete()
+    db.query(models.Payment).delete()
+    db.query(models.Invoice).delete()
+    db.query(models.Job).delete()
+    db.query(models.Driver).delete()
+    db.query(models.Customer).delete()
+    db.commit()
+
+    # 1. Create Customers
+    customer_data = [
+        {"name": "SPEED'S JUICE UK LTD", "address": "12 Trade Park, London, E1 6AN", "email": "accounts@speedsjuice.co.uk", "accountRef": "SPE101", "paymentTerms": "After 30 Days"},
+        {"name": "Global Imports Inc.", "address": "Unit 5, Global Estate, Manchester, M1 2HF", "email": "contact@globalimports.com", "accountRef": "GLO202", "paymentTerms": "After 45 Days"},
+        {"name": "Tech Components Direct", "address": "8 Tech Way, Birmingham, B1 1QU", "email": "sales@techcomponents.co.uk", "accountRef": "TEC303", "paymentTerms": "On Receipt"},
+        {"name": "Fresh Produce Co.", "address": "The Barn, Farm Road, Bristol, BS1 5TT", "email": "orders@freshproduce.co.uk", "accountRef": "FRE404", "paymentTerms": "After 60 Days"},
+    ]
+    customers = []
+    for data in customer_data:
+        customer = crud.create_customer(db, schemas.CustomerCreate(**data))
+        customers.append(customer)
+    print(f"Created {len(customers)} customers.")
+
+    # 2. Create Drivers
+    driver_data = [
+        {"name": "John Smith", "vehicleType": "Luton Van", "vehicleRegistration": "LG71 ZYX"},
+        {"name": "Jane Doe", "vehicleType": "Sprinter", "vehicleRegistration": "BV22 ABC"},
+        {"name": "Peter Jones", "vehicleType": "7.5 Tonne", "vehicleRegistration": "FD70 DEF"},
+    ]
+    drivers = []
+    for data in driver_data:
+        driver = crud.create_driver(db, schemas.DriverCreate(**data))
+        drivers.append(driver)
+    print(f"Created {len(drivers)} drivers.")
+
+    # 3. Create Jobs
+    jobs = []
+    for i in range(50):
+        customer = random.choice(customers)
+        now = datetime.utcnow()
+        due_date = now + timedelta(days=random.randint(1, 5))
+        
+        job_data = schemas.JobCreate(
+            mainSource="Internal",
+            company=customer.name,
+            awbRef=f"AWB-{random.randint(10000, 99999)}-{i}",
+            pickupAddress=f"{random.randint(1, 100)} Pickup St, London, EC2A 4NE",
+            deliveryAddress=f"{random.randint(1, 100)} Delivery Ave, Manchester, M4 4BE",
+            description=f"{random.randint(1, 10)} pallets of goods",
+            pcs=random.randint(1, 10),
+            weight=round(random.uniform(100.0, 2000.0), 2),
+            finalRate=round(random.uniform(150.0, 750.0), 2),
+            customerId=customer.id,
+            dueDateTime=due_date
+        )
+        job = crud.create_job(db, job_data)
+        job.orderDateTime = now - timedelta(days=random.randint(1, 30)) # Backdate order time
+        db.commit()
+        jobs.append(job)
+    print(f"Created {len(jobs)} jobs.")
+    
+    # 4. Process some jobs (assign driver, complete, create invoice)
+    jobs_to_complete = random.sample(jobs, k=30)
+    completed_job_count = 0
+    invoiced_job_count = 0
+    
+    for job in jobs_to_complete:
+        # Assign a driver
+        driver = random.choice(drivers)
+        crud.assign_driver_to_job(db, job_id=job.id, driver_id=driver.id)
+        
+        # Complete the job and create invoice
+        updated_job, invoice = crud.complete_job_and_create_invoice(db, job_id=job.id)
+        completed_job_count += 1
+        
+        if invoice:
+            invoiced_job_count += 1
+            # 5. Create some payments
+            payment_chance = random.random()
+            if payment_chance < 0.5: # 50% paid in full
+                payment_data = schemas.PaymentCreate(amount=invoice.totalAmount, date=datetime.utcnow())
+                crud.create_payment_for_invoice(db, invoice_id=invoice.id, payment=payment_data)
+            elif payment_chance < 0.8: # 30% partially paid
+                payment_amount = round(invoice.totalAmount * random.uniform(0.2, 0.7), 2)
+                payment_data = schemas.PaymentCreate(amount=payment_amount, date=datetime.utcnow())
+                crud.create_payment_for_invoice(db, invoice_id=invoice.id, payment=payment_data)
+
+    print(f"Completed {completed_job_count} jobs.")
+    print(f"Generated {invoiced_job_count} invoices with payments.")
+
+    # 6. Create a special test case for credit note settlement
+    print("Creating special case for 'Settled by Credit' status...")
+    credit_customer_data = {"name": "Credit Test Corp", "address": "1 Credit Lane, London, CR3 D1T", "email": "accounts@credittest.co.uk", "accountRef": "CTC001", "paymentTerms": "On Receipt"}
+    credit_customer = crud.create_customer(db, schemas.CustomerCreate(**credit_customer_data))
+
+    credit_note_data = schemas.CreditNoteCreate(customerId=credit_customer.id, type=models.CreditNoteType.ACCOUNT_BASED, initialAmount=120.00, reason="Test credit")
+    crud.create_credit_note(db, note=credit_note_data)
+    
+    credit_job_data = schemas.JobCreate(
+        mainSource="Internal",
+        company=credit_customer.name,
+        awbRef="AWB-CREDIT-TEST",
+        pickupAddress="123 Pickup St",
+        deliveryAddress="456 Delivery St",
+        finalRate=100.00, # This will result in a total of 120.00 with VAT
+        customerId=credit_customer.id
+    )
+    credit_job = crud.create_job(db, credit_job_data)
+    _, credit_invoice = crud.complete_job_and_create_invoice(db, job_id=credit_job.id)
+    
+    db.refresh(credit_invoice)
+    print(f"Created invoice {credit_invoice.invoice_ref} with status: {credit_invoice.status.value}. Expected: 'Settled by Credit'.")
+
+    print("Database seeding complete!")
+
+
+if __name__ == "__main__":
+    seed_data()
+    db.close()

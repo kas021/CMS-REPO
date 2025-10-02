@@ -1,0 +1,374 @@
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional
+from datetime import datetime
+from .models import JobStatus, ShipStatus, CalculationMethod, InvoiceStatus, CreditNoteType, UserRole, CreditNoteStatus, CreditNoteAction
+
+# Schemas for data returned by the API (Read)
+# ============================================
+
+class APIKey(BaseModel):
+    id: int
+    name: str
+    value: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+class User(BaseModel):
+    id: int
+    username: str
+    role: UserRole
+    password: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class Customer(BaseModel):
+    id: int
+    name: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    accountRef: Optional[str] = None
+    paymentTerms: str = "After 30 Days"
+
+    class Config:
+        from_attributes = True
+
+class Driver(BaseModel):
+    id: int
+    name: str
+    vehicleType: Optional[str] = None
+    vehicleRegistration: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class Payment(BaseModel):
+    id: int
+    invoiceId: int
+    amount: float
+    date: datetime
+
+    class Config:
+        from_attributes = True
+
+class CreditNoteApplication(BaseModel):
+    id: int
+    credit_note_id: int
+    invoice_id: int
+    appliedAmount: float
+    date: datetime
+
+    class Config:
+        from_attributes = True
+
+class CreditNoteHistory(BaseModel):
+    id: int
+    action: CreditNoteAction
+    details: Optional[str] = None
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+class CreditNote(BaseModel):
+    id: int
+    creditNoteRef: str
+    customerId: int
+    type: CreditNoteType
+    invoiceId: Optional[int] = None
+    initialAmount: float
+    remainingAmount: float
+    reason: Optional[str] = None
+    createdAt: datetime
+    status: CreditNoteStatus
+    applications: List[CreditNoteApplication] = []
+    history: List[CreditNoteHistory] = []
+
+    class Config:
+        from_attributes = True
+
+# A smaller Invoice schema for nesting inside Job to avoid circular deps in response
+class InvoiceSummary(BaseModel):
+    id: int
+    invoice_ref: str
+    status: InvoiceStatus
+    credit_applied: float = 0.0
+    
+    class Config:
+        from_attributes = True
+
+# Forward declaration for circular reference
+class Job(BaseModel):
+    id: int
+    mainSource: Optional[str] = None
+    company: str
+    department: Optional[str] = None
+    awbRef: str
+    shipStatus: ShipStatus
+    pickupAddress: str
+    deliveryAddress: str
+    orderDateTime: datetime
+    dueDateTime: Optional[datetime] = None
+    description: Optional[str] = None
+    note: Optional[str] = None
+    pcs: int = 0
+    weight: float = 0.0
+    dimensionH: float = 0.0
+    dimensionL: float = 0.0
+    dimensionW: float = 0.0
+    distance: float = 0.0
+    vehicle: Optional[str] = None
+    calculationMethod: CalculationMethod
+    finalRate: float
+    referredBy: Optional[str] = None
+    referredByEmail: Optional[str] = None
+    status: JobStatus
+    emailFrom: Optional[str] = None
+    customerId: int
+    driverId: Optional[int] = None
+    
+    customer: Customer
+    driver: Optional[Driver] = None
+    invoice: Optional[InvoiceSummary] = None
+    
+    class Config:
+        from_attributes = True
+        
+class Invoice(BaseModel):
+    id: int
+    invoice_ref: str
+    invoiceDate: datetime
+    dueDate: datetime
+    subtotal: float
+    vatAmount: float
+    totalAmount: float
+    paidAmount: float
+    credit_applied: float = 0.0
+    outstandingAmount: float
+    status: InvoiceStatus
+    jobId: int
+    customerId: int
+    
+    job: Job
+    customer: Customer
+    payments: List[Payment] = []
+    applications: List[CreditNoteApplication] = []
+    
+    class Config:
+        from_attributes = True
+
+
+# Schemas for data sent to the API (Create / Update)
+# ===================================================
+
+class APIKeyBase(BaseModel):
+    name: str
+    value: str
+
+class APIKeyCreate(APIKeyBase):
+    pass
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=1)
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: User
+
+# Driver-specific Schemas
+class DriverToken(BaseModel):
+    access_token: str
+    token_type: str
+
+class DriverJobSummary(BaseModel):
+    id: int
+    awbRef: str
+    pickupCity: str
+    deliveryCity: str
+    status: JobStatus
+
+class DriverJobDetail(DriverJobSummary):
+    pickupAddress: str
+    deliveryAddress: str
+    description: str
+    note: str
+    pcs: int
+    weight: float
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+    role: Optional[str] = None
+
+class CustomerCreate(BaseModel):
+    name: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    accountRef: Optional[str] = None
+    paymentTerms: str = "After 30 Days"
+
+class DriverCreate(BaseModel):
+    name: str
+    vehicleType: Optional[str] = None
+    vehicleRegistration: Optional[str] = None
+
+class PaymentCreate(BaseModel):
+    amount: float = Field(..., gt=0, description="Payment amount must be positive")
+    date: datetime = Field(default_factory=datetime.utcnow)
+
+class CreditNoteCreate(BaseModel):
+    customerId: int
+    type: CreditNoteType
+    invoiceId: Optional[int] = None
+    initialAmount: float = Field(..., gt=0)
+    reason: str
+
+class CreditNoteUpdate(BaseModel):
+    reason: Optional[str] = None
+    remainingAmount: Optional[float] = Field(None, ge=0)
+
+class ManualApplySchema(BaseModel):
+    invoice_id: int
+    amount: float = Field(..., gt=0)
+
+
+class JobCreate(BaseModel):
+    mainSource: Optional[str] = None
+    company: str
+    department: Optional[str] = None
+    awbRef: str
+    shipStatus: ShipStatus = ShipStatus.NORMAL
+    pickupAddress: str
+    deliveryAddress: str
+    orderDateTime: Optional[datetime] = None
+    dueDateTime: Optional[datetime] = None
+    description: Optional[str] = None
+    note: Optional[str] = None
+    pcs: int = 0
+    weight: float = 0.0
+    dimensionH: float = 0.0
+    dimensionL: float = 0.0
+    dimensionW: float = 0.0
+    distance: float = 0.0
+    vehicle: Optional[str] = None
+    calculationMethod: CalculationMethod = CalculationMethod.OTHER
+    finalRate: float = Field(..., le=100_000, description="Final rate cannot exceed 100,000")
+    referredBy: Optional[str] = None
+    referredByEmail: Optional[str] = None
+    customerId: int
+
+class InvoiceBase(BaseModel):
+    invoice_ref: str
+    invoiceDate: datetime
+    dueDate: datetime
+    subtotal: float
+    vatAmount: float
+    totalAmount: float
+    outstandingAmount: float
+    jobId: int
+    customerId: int
+
+class InvoiceCreate(InvoiceBase):
+    pass
+    
+class JobUpdate(BaseModel):
+    mainSource: Optional[str] = None
+    company: Optional[str] = None
+    department: Optional[str] = None
+    awbRef: Optional[str] = None
+    shipStatus: Optional[ShipStatus] = None
+    pickupAddress: Optional[str] = None
+    deliveryAddress: Optional[str] = None
+    dueDateTime: Optional[datetime] = None
+    description: Optional[str] = None
+    note: Optional[str] = None
+    pcs: Optional[int] = None
+    weight: Optional[float] = None
+    dimensionH: Optional[float] = None
+    dimensionL: Optional[float] = None
+    dimensionW: Optional[float] = None
+    distance: Optional[float] = None
+    vehicle: Optional[str] = None
+    calculationMethod: Optional[CalculationMethod] = None
+    finalRate: Optional[float] = Field(None, le=100_000, description="Final rate cannot exceed 100,000")
+    customerId: Optional[int] = None
+    status: Optional[JobStatus] = None
+    driverId: Optional[int] = None
+
+class AssignDriverPayload(BaseModel):
+    driver_id: int
+
+# Schemas for settings and preferences to match frontend types
+class CompanyAddress(BaseModel):
+    street: str
+    city: str
+    postcode: str
+    country: str
+
+class BankDetails(BaseModel):
+    name: str
+    sortCode: str
+    account: str
+    bic: str
+    iban: str
+
+class CompanyDetails(BaseModel):
+    name: str
+    logo: str
+    address: CompanyAddress
+    phone: str
+    email: EmailStr
+    www: str
+    regNo: str
+    vatNo: str
+    bankDetails: BankDetails
+
+class InvoiceTemplateSection(BaseModel):
+    id: str
+    name: str
+    visible: bool
+
+class InvoiceTemplateStyles(BaseModel):
+    logoSize: int
+    accentColor: str
+    fontSize: str
+    headerAlign: str
+
+class InvoiceTemplateSettings(BaseModel):
+    id: str
+    name: str
+    sections: List[InvoiceTemplateSection]
+    styles: InvoiceTemplateStyles
+
+# Schemas for Statement of Accounts
+class StatementItem(BaseModel):
+    invoiceDate: datetime
+    invoice_ref: str
+    awbRef: Optional[str] = None
+    totalAmount: float
+    paidAmount: float
+    credit_applied: float = 0.0
+    outstandingAmount: float
+
+    class Config:
+        from_attributes = True
+
+class StatementOfAccounts(BaseModel):
+    customerName: str
+    startDate: Optional[datetime] = None
+    endDate: Optional[datetime] = None
+    items: List[StatementItem]
+    totalBilled: float
+    totalPaid: float
+    totalCreditApplied: float
+    totalOutstanding: float

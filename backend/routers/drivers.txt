@@ -1,0 +1,81 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from typing import List, Dict
+from .. import schemas, models
+
+router = APIRouter(
+    prefix="/drivers",
+    tags=["Drivers Stubs"],
+)
+
+# --- FAKE IN-MEMORY DB FOR STUB ENDPOINTS ---
+# Using a dictionary to allow modifications that persist between calls (in a single server run)
+fake_jobs_db: Dict[int, schemas.DriverJobDetail] = {
+    2001: { "id": 2001, "awbRef": "AWB-75832-1", "pickupCity": "London", "deliveryCity": "Manchester", "status": models.JobStatus.ASSIGNED, "pickupAddress": "123 Distribution Way, London, E1 6AN", "deliveryAddress": "456 Industrial Park, Manchester, M1 2HF", "description": "5 pallets of consumer electronics", "note": "Deliver to back entrance, receiving dept closes at 4 PM.", "pcs": 5, "weight": 1250 },
+    2002: { "id": 2002, "awbRef": "AWB-19475-2", "pickupCity": "Birmingham", "deliveryCity": "Glasgow", "status": models.JobStatus.ASSIGNED, "pickupAddress": "789 Trade St, Birmingham, B1 1QU", "deliveryAddress": "101 Commerce Blvd, Glasgow, G1 1XX", "description": "2 crates of machine parts", "note": "", "pcs": 2, "weight": 800 },
+    2003: { "id": 2003, "awbRef": "AWB-54321-3", "pickupCity": "Leeds", "deliveryCity": "Bristol", "status": models.JobStatus.EN_ROUTE, "pickupAddress": "45 Industrial Ave, Leeds, LS1 5SU", "deliveryAddress": "67 Portside Dr, Bristol, BS1 5TT", "description": "10 rolls of fabric", "note": "Call recipient 30 mins before arrival.", "pcs": 10, "weight": 500 },
+    2004: { "id": 2004, "awbRef": "AWB-98765-4", "pickupCity": "Sheffield", "deliveryCity": "London", "status": models.JobStatus.DELIVERED, "pickupAddress": "22 Steelworks Rd, Sheffield, S1 2GY", "deliveryAddress": "88 Retail Park, London, W1T 3NL", "description": "1 shipment of furniture", "note": "Handle with care.", "pcs": 15, "weight": 2100 },
+}
+# --- END FAKE DB ---
+
+
+@router.post("/token", response_model=schemas.DriverToken)
+def driver_login_stub(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Stub for driver login. Accepts any username with password 'password123'.
+    """
+    if form_data.password == "password123":
+        return {"access_token": f"fake-driver-token-for-{form_data.username}", "token_type": "bearer"}
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+@router.get("/me/jobs", response_model=List[schemas.DriverJobSummary])
+def get_driver_active_jobs_stub():
+    """
+    Stub that returns active jobs (Assigned or En Route).
+    """
+    active_statuses = [models.JobStatus.ASSIGNED, models.JobStatus.EN_ROUTE]
+    active_jobs = [schemas.DriverJobSummary(**job) for job in fake_jobs_db.values() if job["status"] in active_statuses]
+    return active_jobs
+
+@router.get("/me/history", response_model=List[schemas.DriverJobSummary])
+def get_driver_history_stub():
+    """
+    Stub that returns completed jobs (Delivered).
+    """
+    completed_jobs = [schemas.DriverJobSummary(**job) for job in fake_jobs_db.values() if job["status"] == models.JobStatus.DELIVERED]
+    return completed_jobs
+
+@router.get("/jobs/{job_id}", response_model=schemas.DriverJobDetail)
+def get_driver_job_detail_stub(job_id: int):
+    """
+    Stub that returns details for a specific job ID from the fake DB.
+    """
+    if job_id not in fake_jobs_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return fake_jobs_db[job_id]
+
+@router.post("/jobs/{job_id}/accept", response_model=schemas.DriverJobDetail)
+def accept_job_stub(job_id: int):
+    """
+    Stub to update a job's status from ASSIGNED to EN_ROUTE.
+    """
+    if job_id not in fake_jobs_db or fake_jobs_db[job_id]["status"] != models.JobStatus.ASSIGNED:
+        raise HTTPException(status_code=404, detail="Job not found or not in 'Assigned' state")
+    
+    fake_jobs_db[job_id]["status"] = models.JobStatus.EN_ROUTE
+    return fake_jobs_db[job_id]
+
+@router.post("/jobs/{job_id}/deliver", response_model=schemas.DriverJobDetail)
+def deliver_job_stub(job_id: int):
+    """
+    Stub to update a job's status from EN_ROUTE to DELIVERED.
+    """
+    if job_id not in fake_jobs_db or fake_jobs_db[job_id]["status"] != models.JobStatus.EN_ROUTE:
+        raise HTTPException(status_code=404, detail="Job not found or not in 'En Route' state")
+        
+    fake_jobs_db[job_id]["status"] = models.JobStatus.DELIVERED
+    return fake_jobs_db[job_id]

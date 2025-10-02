@@ -1,0 +1,5 @@
+{
+  "name": "Logistics & Invoice CMS",
+  "description": "A comprehensive Content Management System for logistics and invoice management, now featuring a robust PostgreSQL backend with Alembic for database migrations. This application allows for managing airway/haulage jobs, data entry, data management, invoicing, and reporting through a simple, tabbed admin interface.",
+  "requestFramePermissions": []
+}

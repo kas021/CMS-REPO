@@ -1,0 +1,19 @@
+File: utils/api.ts (NEW)
+- Created a new file to manage and export a configurable `API_BASE_URL`.
+- The URL is sourced from `localStorage.getItem('backend_url')` and defaults to `http://localhost:8000`.
+
+File: components/LoginTabs.tsx
+- Imported the new `API_BASE_URL`.
+- Added a form at the bottom of the login screen to display and update the backend URL.
+- On save, the new URL is stored in `localStorage` and the page is reloaded to apply the setting.
+
+File: components/CompanyDataPage.tsx
+- Imported `API_BASE_URL`.
+- Updated the `fetch` calls in the `BackupPanel` component for exporting and importing data to use the configurable `API_BASE_URL`.
+  - `/backup/export` -> `${API_BASE_URL}/backup/export`
+  - `/backup/import` -> `${API_BASE_URL}/backup/import`
+
+File: components/ProfilePage.tsx
+- Imported `API_BASE_URL`.
+- Updated commented-out example `fetch` calls in the API Keys panel to use the configurable `API_BASE_URL` and corrected the API path.
+  - `/api/settings/api-keys` -> `${API_BASE_URL}/settings/api-keys`

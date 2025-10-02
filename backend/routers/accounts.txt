@@ -1,0 +1,62 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from datetime import datetime
+
+from .. import crud, schemas, models, security
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/accounts",
+    tags=["Accounts"],
+    dependencies=[Depends(security.get_current_user)],
+)
+
+@router.get("/statement-of-accounts", response_model=schemas.StatementOfAccounts)
+def get_statement_of_accounts(
+    customer_id: Optional[int] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    db: Session = Depends(get_db)
+):
+    invoices = crud.get_statement_of_accounts(
+        db,
+        customer_id=customer_id,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    customer_name = "All Customers"
+    if customer_id:
+        customer = crud.get_customer(db, customer_id=customer_id)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        customer_name = customer.name
+
+    items = []
+    for inv in invoices:
+        items.append(schemas.StatementItem(
+            invoiceDate=inv.invoiceDate,
+            invoice_ref=inv.invoice_ref,
+            awbRef=inv.job.awbRef if inv.job else None,
+            totalAmount=inv.totalAmount,
+            paidAmount=inv.paidAmount,
+            credit_applied=inv.credit_applied,
+            outstandingAmount=inv.outstandingAmount
+        ))
+
+    total_billed = sum(i.totalAmount for i in items)
+    total_paid = sum(i.paidAmount for i in items)
+    total_credit_applied = sum(i.credit_applied for i in items)
+    total_outstanding = sum(i.outstandingAmount for i in items)
+
+    return schemas.StatementOfAccounts(
+        customerName=customer_name,
+        startDate=start_date,
+        endDate=end_date,
+        items=items,
+        totalBilled=total_billed,
+        totalPaid=total_paid,
+        totalCreditApplied=total_credit_applied,
+        totalOutstanding=total_outstanding
+    )

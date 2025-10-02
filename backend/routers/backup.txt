@@ -1,0 +1,131 @@
+import zipfile
+import json
+import io
+from datetime import datetime
+from typing import List
+
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session, joinedload
+from pydantic import ValidationError
+
+from .. import crud, schemas, models, security
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/backup",
+    tags=["Backup"],
+    dependencies=[Depends(security.get_current_super_admin)],
+)
+
+class ExportPayload(BaseModel):
+    settings: schemas.CompanyDetails
+    preferences: List[schemas.InvoiceTemplateSettings]
+
+class ImportResponse(BaseModel):
+    message: str
+    settings: schemas.CompanyDetails
+    preferences: List[schemas.InvoiceTemplateSettings]
+
+@router.post("/export")
+def export_backup(payload: ExportPayload, db: Session = Depends(get_db)):
+    # 1. Get all data from DB
+    customers = db.query(models.Customer).all()
+    drivers = db.query(models.Driver).all()
+    jobs = db.query(models.Job).options(joinedload('*')).all()
+    invoices = db.query(models.Invoice).options(joinedload('*')).all()
+
+    # 2. Serialize data using Pydantic models to ensure consistency
+    customers_dict = [schemas.Customer.from_orm(c).dict() for c in customers]
+    drivers_dict = [schemas.Driver.from_orm(d).dict() for d in drivers]
+    jobs_dict = [schemas.Job.from_orm(j).dict() for j in jobs]
+    invoices_dict = [schemas.Invoice.from_orm(i).dict() for i in invoices]
+
+    # 3. Create zip file in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, False) as zip_file:
+        zip_file.writestr("customers.json", json.dumps(customers_dict, indent=2, default=str))
+        zip_file.writestr("drivers.json", json.dumps(drivers_dict, indent=2, default=str))
+        zip_file.writestr("jobs.json", json.dumps(jobs_dict, indent=2, default=str))
+        zip_file.writestr("invoices.json", json.dumps(invoices_dict, indent=2, default=str))
+        zip_file.writestr("settings.json", payload.settings.json(indent=2))
+        zip_file.writestr("preferences.json", json.dumps([p.dict() for p in payload.preferences], indent=2))
+
+    zip_buffer.seek(0)
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"als_backup_{timestamp}.zip"
+    
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@router.post("/import", response_model=ImportResponse)
+async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a .zip file.")
+
+    contents = await file.read()
+    
+    try:
+        with zipfile.ZipFile(io.BytesIO(contents), "r") as zip_ref:
+            # Validate and extract data
+            customers_data = [schemas.Customer(**c) for c in json.loads(zip_ref.read("customers.json"))]
+            drivers_data = [schemas.Driver(**d) for d in json.loads(zip_ref.read("drivers.json"))]
+            jobs_data = [schemas.Job(**j) for j in json.loads(zip_ref.read("jobs.json"))]
+            invoices_data = [schemas.Invoice(**i) for i in json.loads(zip_ref.read("invoices.json"))]
+            settings_data = schemas.CompanyDetails(**json.loads(zip_ref.read("settings.json")))
+            preferences_data = [schemas.InvoiceTemplateSettings(**p) for p in json.loads(zip_ref.read("preferences.json"))]
+
+    except (KeyError, json.JSONDecodeError, zipfile.BadZipFile, ValidationError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid or corrupted backup file: {e}")
+
+    try:
+        # Delete existing data in correct order to respect foreign keys
+        db.query(models.Payment).delete(synchronize_session=False)
+        db.query(models.Invoice).delete(synchronize_session=False)
+        db.query(models.Job).delete(synchronize_session=False)
+        db.query(models.Driver).delete(synchronize_session=False)
+        db.query(models.Customer).delete(synchronize_session=False)
+        
+        # Insert new data, preserving IDs
+        db.bulk_insert_mappings(models.Customer, [c.dict() for c in customers_data])
+        db.bulk_insert_mappings(models.Driver, [d.dict() for d in drivers_data])
+        
+        # For models with relationships, strip nested objects before bulk insert
+        jobs_to_insert = []
+        for j in jobs_data:
+            job_dict = j.dict()
+            job_dict.pop('customer', None)
+            job_dict.pop('driver', None)
+            job_dict.pop('invoice', None)
+            jobs_to_insert.append(job_dict)
+        db.bulk_insert_mappings(models.Job, jobs_to_insert)
+
+        all_payments_to_insert = []
+        invoices_to_insert = []
+        for i in invoices_data:
+            invoice_dict = i.dict()
+            invoice_dict.pop('job', None)
+            invoice_dict.pop('customer', None)
+            payments = invoice_dict.pop('payments', [])
+            invoices_to_insert.append(invoice_dict)
+            for p in payments:
+                all_payments_to_insert.append(p)
+
+        db.bulk_insert_mappings(models.Invoice, invoices_to_insert)
+        if all_payments_to_insert:
+            db.bulk_insert_mappings(models.Payment, all_payments_to_insert)
+        
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database import failed: {e}")
+
+    return {
+        "message": "Backup imported successfully.",
+        "settings": settings_data,
+        "preferences": preferences_data
+    }

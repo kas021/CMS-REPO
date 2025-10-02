@@ -1,0 +1,36 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from typing import List
+
+from .. import crud, schemas, models, security
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/settings",
+    tags=["Settings"],
+    dependencies=[Depends(security.get_current_super_admin)],
+)
+
+@router.get("/api-keys", response_model=List[schemas.APIKey])
+def read_api_keys(db: Session = Depends(get_db)):
+    """
+    Retrieve all API keys. Super admin access required.
+    """
+    return crud.get_api_keys(db)
+
+@router.post("/api-keys", response_model=List[schemas.APIKey])
+def create_or_update_api_keys(keys: List[schemas.APIKeyCreate], db: Session = Depends(get_db)):
+    """
+    Create or update a list of API keys. Super admin access required.
+    This performs an "upsert" operation based on the key name.
+    """
+    updated_keys = []
+    for key_data in keys:
+        if not key_data.name or not key_data.value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="API key name and value cannot be empty."
+            )
+        updated_key = crud.upsert_api_key(db=db, key=key_data)
+        updated_keys.append(updated_key)
+    return updated_keys

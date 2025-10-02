@@ -1,0 +1,113 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from .. import crud, models, schemas, security
+from ..database import get_db
+import random
+
+router = APIRouter(
+    prefix="/testing",
+    tags=["Testing"],
+    dependencies=[Depends(security.get_current_super_admin)],
+)
+
+@router.post("/run-e2e-workflow")
+def run_e2e_workflow(db: Session = Depends(get_db)):
+    """
+    Simulates an end-to-end workflow to test the integrity of the system.
+    """
+    results = {}
+    
+    try:
+        # 1. Create a test customer and driver
+        customer_data = schemas.CustomerCreate(name=f"E2E Test Customer {random.randint(1000, 9999)}", paymentTerms="On Receipt")
+        test_customer = crud.create_customer(db, customer=customer_data)
+        results["customer_creation"] = "OK"
+
+        driver_data = schemas.DriverCreate(name=f"E2E Test Driver {random.randint(1000, 9999)}", vehicleType="Test Van", vehicleRegistration=f"TEST{random.randint(1000, 9999)}")
+        test_driver = crud.create_driver(db, driver=driver_data)
+        results["driver_creation"] = "OK"
+
+        # 2. Create a credit note for this customer
+        credit_note_data = schemas.CreditNoteCreate(
+            customerId=test_customer.id,
+            type=models.CreditNoteType.ACCOUNT_BASED,
+            initialAmount=50.0,
+            reason="E2E Test Credit"
+        )
+        test_credit_note = crud.create_credit_note(db, note=credit_note_data)
+        results["credit_note_creation"] = "OK"
+
+        # 3. Create a new job
+        job_data = schemas.JobCreate(
+            company=test_customer.name,
+            awbRef=f"E2E-TEST-{random.randint(1000, 9999)}",
+            pickupAddress="1 Test St",
+            deliveryAddress="2 Test Rd",
+            finalRate=200.0,
+            customerId=test_customer.id
+        )
+        test_job = crud.create_job(db, job=job_data)
+        results["job_creation"] = "OK"
+
+        # 4. Assign the job to the driver
+        crud.assign_driver_to_job(db, job_id=test_job.id, driver_id=test_driver.id)
+        results["job_assignment"] = "OK"
+
+        # 5. Complete the job, which triggers invoice creation and credit application
+        _, test_invoice = crud.complete_job_and_create_invoice(db, job_id=test_job.id)
+        if not test_invoice:
+            raise Exception("Invoice was not created")
+        results["job_completion_and_invoice_creation"] = "OK"
+
+        # 6. Verify the invoice and credit note application
+        db.refresh(test_invoice)
+        expected_total = 200.0 * 1.20  # 200 + 20% VAT
+        expected_outstanding = expected_total - 50.0  # Total - Credit Note
+        
+        if not (abs(test_invoice.totalAmount - expected_total) < 0.01):
+            raise Exception(f"Invoice total mismatch: got {test_invoice.totalAmount}, expected {expected_total}")
+        if not (abs(test_invoice.outstandingAmount - expected_outstanding) < 0.01):
+            raise Exception(f"Invoice outstanding amount mismatch after credit: got {test_invoice.outstandingAmount}, expected {expected_outstanding}")
+        results["invoice_credit_application_verification"] = "OK"
+
+        # 7. Verify Statement of Accounts
+        sao_invoices = crud.get_statement_of_accounts(db, customer_id=test_customer.id, start_date=None, end_date=None)
+        if not any(inv.id == test_invoice.id for inv in sao_invoices):
+            raise Exception("Invoice not found in statement of accounts")
+        results["sao_verification"] = "OK"
+
+        # 8. Mark the invoice as fully paid
+        payment_data = schemas.PaymentCreate(amount=test_invoice.outstandingAmount)
+        crud.create_payment_for_invoice(db, invoice_id=test_invoice.id, payment=payment_data)
+        results["invoice_payment"] = "OK"
+
+        # 9. Verify final payment status
+        db.refresh(test_invoice)
+        if test_invoice.status != models.InvoiceStatus.PAID or test_invoice.outstandingAmount != 0:
+            raise Exception(f"Invoice not fully paid. Status: {test_invoice.status}, Outstanding: {test_invoice.outstandingAmount}")
+        results["final_status_verification"] = "OK"
+        
+        db.commit()
+        return {"status": "SUCCESS", "details": results}
+
+    except Exception as e:
+        db.rollback()
+        results["error"] = str(e)
+        raise HTTPException(status_code=500, detail={"status": "FAILURE", "details": results})
+    
+    finally:
+        # Clean up test data
+        if 'test_invoice' in locals() and test_invoice:
+            db.query(models.Payment).filter(models.Payment.invoiceId == test_invoice.id).delete()
+            db.query(models.CreditNoteApplication).filter(models.CreditNoteApplication.invoice_id == test_invoice.id).delete()
+            db.query(models.Invoice).filter(models.Invoice.id == test_invoice.id).delete()
+        if 'test_job' in locals() and test_job:
+            db.query(models.Job).filter(models.Job.id == test_job.id).delete()
+        if 'test_credit_note' in locals() and test_credit_note:
+            db.query(models.CreditNote).filter(models.CreditNote.id == test_credit_note.id).delete()
+        if 'test_customer' in locals() and test_customer:
+            db.query(models.Customer).filter(models.Customer.id == test_customer.id).delete()
+        if 'test_driver' in locals() and test_driver:
+            db.query(models.Driver).filter(models.Driver.id == test_driver.id).delete()
+        db.commit()

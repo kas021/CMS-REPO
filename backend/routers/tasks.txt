@@ -1,0 +1,21 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from .. import crud, security
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/tasks",
+    tags=["Tasks"],
+    dependencies=[Depends(security.get_current_super_admin)],
+)
+
+@router.post("/cleanup-driver-locations", summary="Cleanup Old Driver Locations")
+def cleanup_driver_locations(db: Session = Depends(get_db)):
+    """
+    Deletes driver location records that are older than 7 days.
+    This is intended to be called by a scheduled job (e.g., a cron job).
+    Requires Super Admin privileges.
+    """
+    deleted_count = crud.delete_old_driver_locations(db)
+    return {"message": "Cleanup successful", "deleted_records": deleted_count}

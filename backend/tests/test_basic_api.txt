@@ -1,0 +1,41 @@
+from fastapi.testclient import TestClient
+import sys
+import os
+
+# Add the project root to the path to allow imports from `backend`
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+from backend.main import app
+
+client = TestClient(app)
+
+def test_read_root():
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.json() == {"message": "Welcome to the Logistics & Invoice CMS API"}
+
+def test_read_jobs_endpoint():
+    response = client.get("/jobs/")
+    assert response.status_code == 200
+    # The response should be a list, even if it's empty.
+    assert isinstance(response.json(), list)
+
+def test_read_invoices_endpoint():
+    response = client.get("/invoices/")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+def test_read_customers_endpoint():
+    response = client.get("/customers/")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+def test_read_drivers_endpoint():
+    response = client.get("/drivers/")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+# To run tests:
+# 1. Make sure you are in the project root directory (the one containing the backend folder).
+# 2. Ensure pytest is installed (`pip install pytest`).
+# 3. Run the command: pytest

@@ -1,0 +1,198 @@
+from sqlalchemy import Column, ForeignKey, Integer, String, Float, DateTime, Enum as SQLAlchemyEnum, Text
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+import enum
+from .database import Base
+
+# Enum definitions to match frontend types
+class JobStatus(str, enum.Enum):
+    PENDING = 'PENDING'
+    ASSIGNED = 'ASSIGNED'
+    COMPLETED = 'COMPLETED'
+    CANCELLED = 'CANCELLED'
+
+class ShipStatus(str, enum.Enum):
+    NORMAL = 'Normal'
+    PRIORITY = 'Priority'
+
+class CalculationMethod(str, enum.Enum):
+    PIECES = 'Pieces'
+    WEIGHT = 'Weight'
+    DIMENSION = 'Dimension'
+    DISTANCE = 'Distance'
+    OTHER = 'Other'
+
+class InvoiceStatus(str, enum.Enum):
+    UNPAID = 'Unpaid'
+    PARTIALLY_PAID = 'Partially Paid'
+    PAID = 'Paid'
+    SETTLED_WITH_CREDIT = 'Settled with Credit'
+
+class CreditNoteType(str, enum.Enum):
+    JOB_BASED = 'Job-based'
+    ACCOUNT_BASED = 'Account-based'
+
+class CreditNoteStatus(str, enum.Enum):
+    ACTIVE = 'Active'
+    DEPLETED = 'Depleted'
+    VOIDED = 'Voided'
+
+class CreditNoteAction(str, enum.Enum):
+    CREATED = 'CREATED'
+    APPLIED_TO_INVOICE = 'APPLIED_TO_INVOICE'
+    REVERSED_FROM_INVOICE = 'REVERSED_FROM_INVOICE'
+    VOIDED = 'VOIDED'
+    EDITED_REASON = 'EDITED_REASON'
+    EDITED_BALANCE = 'EDITED_BALANCE'
+    MANUAL_APPLICATION = 'MANUAL_APPLICATION'
+
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    SUPER_ADMIN = "super_admin"
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    password = Column(String, nullable=False)
+    role = Column(String, default=UserRole.ADMIN.value, nullable=False)
+
+class APIKey(Base):
+    __tablename__ = "api_keys"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True, nullable=False)
+    value = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+class Customer(Base):
+    __tablename__ = "customers"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True, nullable=False)
+    address = Column(Text, nullable=True)
+    phone = Column(String, nullable=True)
+    email = Column(String, unique=True, index=True, nullable=True)
+    accountRef = Column(String, unique=True, nullable=True)
+    paymentTerms = Column(String, default="After 30 Days")
+
+    jobs = relationship("Job", back_populates="customer")
+    invoices = relationship("Invoice", back_populates="customer")
+    credit_notes = relationship("CreditNote", back_populates="customer")
+
+class Driver(Base):
+    __tablename__ = "drivers"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    vehicleType = Column(String, nullable=True)
+    vehicleRegistration = Column(String, unique=True, nullable=True)
+
+    jobs = relationship("Job", back_populates="driver")
+
+class Job(Base):
+    __tablename__ = "jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    mainSource = Column(String, nullable=True)
+    company = Column(String, nullable=False)
+    department = Column(String, nullable=True)
+    awbRef = Column(String, index=True, nullable=False)
+    shipStatus = Column(SQLAlchemyEnum(ShipStatus), default=ShipStatus.NORMAL)
+    pickupAddress = Column(Text, nullable=False)
+    deliveryAddress = Column(Text, nullable=False)
+    orderDateTime = Column(DateTime(timezone=True), server_default=func.now())
+    dueDateTime = Column(DateTime(timezone=True), nullable=True)
+    description = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+    pcs = Column(Integer, default=0)
+    weight = Column(Float, default=0.0)
+    dimensionH = Column(Float, default=0.0)
+    dimensionL = Column(Float, default=0.0)
+    dimensionW = Column(Float, default=0.0)
+    distance = Column(Float, default=0.0)
+    vehicle = Column(String, nullable=True)
+    calculationMethod = Column(SQLAlchemyEnum(CalculationMethod), default=CalculationMethod.OTHER)
+    finalRate = Column(Float, default=0.0)
+    referredBy = Column(String, nullable=True)
+    referredByEmail = Column(String, nullable=True)
+    status = Column(SQLAlchemyEnum(JobStatus), default=JobStatus.PENDING, index=True)
+    emailFrom = Column(String, nullable=True)
+    
+    customerId = Column(Integer, ForeignKey("customers.id"))
+    driverId = Column(Integer, ForeignKey("drivers.id"), nullable=True)
+
+    customer = relationship("Customer", back_populates="jobs")
+    driver = relationship("Driver", back_populates="jobs")
+    invoice = relationship("Invoice", back_populates="job", uselist=False, cascade="all, delete-orphan")
+
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+    id = Column(Integer, primary_key=True, index=True)
+    invoice_ref = Column(String, unique=True, index=True, nullable=False)
+    invoiceDate = Column(DateTime(timezone=True), server_default=func.now())
+    dueDate = Column(DateTime(timezone=True), nullable=False)
+    subtotal = Column(Float, nullable=False)
+    vatAmount = Column(Float, nullable=False)
+    totalAmount = Column(Float, nullable=False)
+    paidAmount = Column(Float, default=0.0)
+    credit_applied = Column(Float, default=0.0)
+    outstandingAmount = Column(Float, nullable=False)
+    status = Column(SQLAlchemyEnum(InvoiceStatus), default=InvoiceStatus.UNPAID, index=True)
+
+    jobId = Column(Integer, ForeignKey("jobs.id"), unique=True)
+    customerId = Column(Integer, ForeignKey("customers.id"))
+    
+    job = relationship("Job", back_populates="invoice")
+    customer = relationship("Customer", back_populates="invoices")
+    payments = relationship("Payment", back_populates="invoice", cascade="all, delete-orphan")
+    applications = relationship("CreditNoteApplication", back_populates="invoice", cascade="all, delete-orphan")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Float, nullable=False)
+    date = Column(DateTime(timezone=True), server_default=func.now())
+    
+    invoiceId = Column(Integer, ForeignKey("invoices.id"))
+
+    invoice = relationship("Invoice", back_populates="payments")
+
+class CreditNote(Base):
+    __tablename__ = "credit_notes"
+    id = Column(Integer, primary_key=True, index=True)
+    creditNoteRef = Column(String, unique=True, index=True, nullable=False)
+    customerId = Column(Integer, ForeignKey("customers.id"), nullable=False)
+    type = Column(SQLAlchemyEnum(CreditNoteType), nullable=False)
+    invoiceId = Column(Integer, ForeignKey("invoices.id"), nullable=True) # Original invoice for job-based notes
+    initialAmount = Column(Float, nullable=False)
+    remainingAmount = Column(Float, nullable=False)
+    reason = Column(Text, nullable=True)
+    createdAt = Column(DateTime(timezone=True), server_default=func.now())
+    status = Column(SQLAlchemyEnum(CreditNoteStatus), default=CreditNoteStatus.ACTIVE, nullable=False)
+
+    customer = relationship("Customer", back_populates="credit_notes")
+    applications = relationship("CreditNoteApplication", back_populates="credit_note", cascade="all, delete-orphan")
+    history = relationship("CreditNoteHistory", back_populates="credit_note", cascade="all, delete-orphan")
+
+
+class CreditNoteApplication(Base):
+    __tablename__ = "credit_note_applications"
+    id = Column(Integer, primary_key=True, index=True)
+    credit_note_id = Column(Integer, ForeignKey("credit_notes.id"), nullable=False)
+    invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=False)
+    appliedAmount = Column(Float, nullable=False)
+    date = Column(DateTime(timezone=True), server_default=func.now())
+
+    credit_note = relationship("CreditNote", back_populates="applications")
+    invoice = relationship("Invoice", back_populates="applications")
+
+class CreditNoteHistory(Base):
+    __tablename__ = "credit_note_history"
+    id = Column(Integer, primary_key=True, index=True)
+    credit_note_id = Column(Integer, ForeignKey("credit_notes.id"), nullable=False)
+    action = Column(SQLAlchemyEnum(CreditNoteAction), nullable=False)
+    details = Column(Text, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    credit_note = relationship("CreditNote", back_populates="history")

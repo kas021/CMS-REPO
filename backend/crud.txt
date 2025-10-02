@@ -1,0 +1,1129 @@
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_, func
+from . import models, schemas, security
+from datetime import datetime, timedelta
+from typing import Optional, List
+import re
+import os
+
+# Utility to parse payment terms
+def parse_payment_term_days(term: str) -> int:
+    if not term: return 30
+    term_lower = term.lower()
+    if 'on receipt' in term_lower:
+        return 0
+    match = re.search(r'\d+', term_lower)
+    if match:
+        return int(match.group(0))
+    return 30
+
+# User CRUD
+def get_user(db: Session, user_id: int):
+    return db.query(models.User).filter(models.User.id == user_id).first()
+
+def get_user_by_username(db: Session, username: str):
+    return db.query(models.User).filter(models.User.username == username).first()
+
+def get_users(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.User).offset(skip).limit(limit).all()
+
+def create_user(db: Session, user: schemas.UserCreate):
+    db_user = models.User(username=user.username, password=user.password, role=models.UserRole.ADMIN.value)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+def delete_user(db: Session, user_id: int):
+    db_user = get_user(db, user_id)
+    if not db_user:
+        return None
+    db.delete(db_user)
+    db.commit()
+    return db_user
+
+def update_user(db: Session, user_id: int, user_update: schemas.UserUpdate):
+    db_user = get_user(db, user_id)
+    if not db_user:
+        return None
+    
+    if db_user.username == os.getenv("SUPER_ADMIN_USERNAME", "sadmin"):
+        return None
+
+    update_data = user_update.dict(exclude_unset=True)
+    
+    if "username" in update_data:
+        db_user.username = update_data["username"]
+    
+    if "password" in update_data and update_data["password"]:
+        db_user.password = update_data["password"]
+
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+def update_user_password(db: Session, user: models.User, new_password: str):
+    user.password = new_password
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+# Customer CRUD
+def get_customer(db: Session, customer_id: int):
+    return db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+
+def get_customers(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.Customer).offset(skip).limit(limit).all()
+
+def create_customer(db: Session, customer: schemas.CustomerCreate):
+    db_customer = models.Customer(**customer.dict())
+    db.add(db_customer)
+    db.commit()
+    db.refresh(db_customer)
+    return db_customer
+
+# Driver CRUD
+def get_driver(db: Session, driver_id: int):
+    return db.query(models.Driver).filter(models.Driver.id == driver_id).first()
+
+def get_drivers(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.Driver).offset(skip).limit(limit).all()
+
+def create_driver(db: Session, driver: schemas.DriverCreate):
+    db_driver = models.Driver(**driver.dict())
+    db.add(db_driver)
+    db.commit()
+    db.refresh(db_driver)
+    return db_driver
+
+# Job CRUD
+def get_job(db: Session, job_id: int):
+    return db.query(models.Job).options(
+        joinedload(models.Job.driver), 
+        joinedload(models.Job.customer),
+        joinedload(models.Job.invoice)
+    ).filter(models.Job.id == job_id).first()
+
+def get_jobs(db: Session, skip: int = 0, limit: int = 100, search: Optional[str] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, main_source: Optional[str] = None, customer_id: Optional[int] = None):
+    query = db.query(models.Job).options(
+        joinedload(models.Job.driver),
+        joinedload(models.Job.customer),
+        joinedload(models.Job.invoice)
+    )
+    if search:
+        search_term = f"%{search.lower()}%"
+        query = query.filter(or_(func.lower(models.Job.company).like(search_term), func.lower(models.Job.awbRef).like(search_term), func.lower(models.Job.description).like(search_term)))
+    if start_date:
+        query = query.filter(models.Job.orderDateTime >= start_date)
+    if end_date:
+        end_date_eod = end_date.replace(hour=23, minute=59, second=59)
+        query = query.filter(models.Job.orderDateTime <= end_date_eod)
+    if main_source and main_source.lower() != "all sources":
+        query = query.filter(models.Job.mainSource == main_source)
+    if customer_id is not None and customer_id != 0:
+        query = query.filter(models.Job.customerId == customer_id)
+
+    return query.order_by(models.Job.id.desc()).offset(skip).limit(limit).all()
+
+def create_job(db: Session, job: schemas.JobCreate):
+    db_job = models.Job(**job.dict())
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+    return db_job
+
+def update_job(db: Session, job_id: int, job_update: schemas.JobUpdate):
+    db_job = get_job(db, job_id)
+    if not db_job:
+        return None
+    update_data = job_update.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_job, key, value)
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+    
+    if db_job.invoice and 'finalRate' in update_data:
+        recalc_invoice_total(db, db_job.invoice.id)
+        db.commit()
+        db.refresh(db_job)
+
+    return db_job
+    
+def delete_job(db: Session, job_id: int):
+    db_job = get_job(db, job_id)
+    if not db_job:
+        return None
+    db.delete(db_job)
+    db.commit()
+    return db_job
+
+def assign_driver_to_job(db: Session, job_id: int, driver_id: int):
+    db_job = get_job(db, job_id)
+    db_driver = get_driver(db, driver_id)
+    if not db_job or not db_driver:
+        return None
+    db_job.driverId = driver_id
+    db_job.driver = db_driver
+    db_job.status = models.JobStatus.ASSIGNED
+    db.commit()
+    db.refresh(db_job)
+    return db_job
+
+def complete_job_and_create_invoice(db: Session, job_id: int):
+    db_job = get_job(db, job_id)
+    if not db_job or db_job.status == models.JobStatus.COMPLETED:
+        return db_job, db_job.invoice if db_job else None
+
+    db_job.status = models.JobStatus.COMPLETED
+    
+    customer = db_job.customer
+    invoice_date = datetime.utcnow()
+    days_to_due = parse_payment_term_days(customer.paymentTerms)
+    due_date = invoice_date + timedelta(days=days_to_due)
+    
+    last_invoice = db.query(models.Invoice).order_by(models.Invoice.id.desc()).first()
+    new_ref_number = (int(last_invoice.invoice_ref.split('-')[1]) + 1) if (last_invoice and last_invoice.invoice_ref.startswith('ALS-')) else 77001
+    
+    invoice_data = schemas.InvoiceBase(
+        invoice_ref=f"ALS-{new_ref_number}", invoiceDate=invoice_date, dueDate=due_date,
+        subtotal=0, vatAmount=0, totalAmount=0, outstandingAmount=0, # Will be set by recalc
+        jobId=db_job.id, customerId=db_job.customerId
+    )
+    
+    db_invoice = models.Invoice(**invoice_data.dict())
+    db.add(db_invoice)
+    db.flush() 
+    
+    recalc_invoice_total(db, db_invoice.id)
+    
+    db.commit()
+    db.refresh(db_job)
+    db.refresh(db_invoice)
+    
+    return db_job, db_invoice
+
+# Invoice CRUD
+def get_invoice(db: Session, invoice_id: int):
+    return db.query(models.Invoice).options(joinedload('*')).filter(models.Invoice.id == invoice_id).first()
+
+def get_invoices(db: Session, skip: int = 0, limit: int = 100, search: Optional[str] = None, search_mode: Optional[str] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
+    query = db.query(models.Invoice).options(joinedload('*'))
+    if start_date:
+        query = query.filter(models.Invoice.invoiceDate >= start_date)
+    if end_date:
+        end_date_eod = end_date.replace(hour=23, minute=59, second=59)
+        query = query.filter(models.Invoice.invoiceDate <= end_date_eod)
+    
+    if search and search_mode:
+        search_term = f"%{search.lower()}%"
+        if search_mode == 'invoice_ref':
+            query = query.filter(func.lower(models.Invoice.invoice_ref).like(search_term))
+        elif search_mode == 'awb':
+            query = query.join(models.Job).filter(func.lower(models.Job.awbRef).like(search_term))
+        elif search_mode == 'customer':
+            query = query.join(models.Customer).filter(func.lower(models.Customer.name).like(search_term))
+
+    return query.order_by(models.Invoice.id.desc()).offset(skip).limit(limit).all()
+
+# Payment CRUD
+def create_payment_for_invoice(db: Session, invoice_id: int, payment: schemas.PaymentCreate):
+    db_invoice = get_invoice(db, invoice_id)
+    if not db_invoice:
+        return None
+    
+    db_payment = models.Payment(**payment.dict(), invoiceId=invoice_id)
+    db.add(db_payment)
+    db.flush()
+    
+    recalc_invoice_total(db, invoice_id)
+        
+    db.commit()
+    db.refresh(db_payment)
+    db.refresh(db_invoice)
+    return db_payment
+
+# Recalculation Engine
+def get_available_credit_notes_for_customer(db: Session, customer_id: int):
+    return db.query(models.CreditNote).filter(
+        models.CreditNote.customerId == customer_id,
+        models.CreditNote.remainingAmount > 0.009, # floating point safety
+        models.CreditNote.status == models.CreditNoteStatus.ACTIVE
+    ).order_by(models.CreditNote.createdAt.asc()).all()
+
+def recalc_invoice_total(db: Session, invoice_id: int, user: Optional[models.User] = None):
+    invoice = get_invoice(db, invoice_id)
+    if not invoice: return None
+
+    # 1. Recalculate subtotal from job
+    subtotal = invoice.job.finalRate
+    invoice.subtotal = subtotal
+    invoice.vatAmount = subtotal * 0.20
+    invoice.totalAmount = subtotal + invoice.vatAmount
+
+    # 2. Revert previously applied credits for this invoice
+    for app in list(invoice.applications):
+        credit_note = app.credit_note
+        credit_note.remainingAmount += app.appliedAmount
+        log_credit_note_action(db, credit_note_id=credit_note.id, action=models.CreditNoteAction.REVERSED_FROM_INVOICE, details=f"Reversed £{app.appliedAmount:.2f} from invoice {invoice.invoice_ref} due to recalculation.", user=user)
+        db.delete(app)
+    db.flush()
+
+    # 3. Recalculate cash paid and reset credit applied
+    invoice.paidAmount = sum(p.amount for p in invoice.payments)
+    invoice.credit_applied = 0.0
+    
+    # 4. Apply available credits to remaining balance
+    outstanding_amount = invoice.totalAmount - invoice.paidAmount
+    if outstanding_amount > 0.009:
+        available_notes = get_available_credit_notes_for_customer(db, invoice.customerId)
+        
+        for note in available_notes:
+            if outstanding_amount <= 0.009: break
+            
+            amount_to_apply = min(outstanding_amount, note.remainingAmount)
+            
+            db.add(models.CreditNoteApplication(credit_note_id=note.id, invoice_id=invoice.id, appliedAmount=amount_to_apply))
+            log_credit_note_action(db, credit_note_id=note.id, action=models.CreditNoteAction.APPLIED_TO_INVOICE, details=f"Applied £{amount_to_apply:.2f} to invoice {invoice.invoice_ref}.", user=user)
+            
+            note.remainingAmount -= amount_to_apply
+            invoice.credit_applied += amount_to_apply
+            outstanding_amount -= amount_to_apply
+    
+    # 5. Finalize invoice totals and status
+    invoice.outstandingAmount = max(0, outstanding_amount)
+    
+    if invoice.outstandingAmount <= 0.01:
+        invoice.outstandingAmount = 0
+        invoice.status = models.InvoiceStatus.PAID if invoice.paidAmount > 0 else models.InvoiceStatus.SETTLED_WITH_CREDIT
+    else:
+        invoice.status = models.InvoiceStatus.PARTIALLY_PAID if (invoice.paidAmount + invoice.credit_applied) > 0 else models.InvoiceStatus.UNPAID
+        
+    db.add(invoice)
+    return invoice
+
+# Credit Note CRUD & History
+def log_credit_note_action(db: Session, credit_note_id: int, action: models.CreditNoteAction, details: str, user: Optional[models.User] = None):
+    final_details = details
+    if user:
+        final_details = f"{details} Action performed by {user.username}."
+    history_entry = models.CreditNoteHistory(credit_note_id=credit_note_id, action=action, details=final_details)
+    db.add(history_entry)
+
+def get_credit_notes(db: Session, skip: int = 0, limit: int = 100):
+    return db.query(models.CreditNote).options(joinedload('*')).order_by(models.CreditNote.createdAt.desc()).offset(skip).limit(limit).all()
+
+def create_credit_note(db: Session, note: schemas.CreditNoteCreate, user: models.User):
+    last_note = db.query(models.CreditNote).order_by(models.CreditNote.id.desc()).first()
+    new_ref_number = (int(last_note.creditNoteRef.split('-')[1]) + 1) if (last_note and last_note.creditNoteRef.startswith('CN-')) else 3001
+    
+    db_note = models.CreditNote(
+        creditNoteRef=f"CN-{new_ref_number}", customerId=note.customerId, type=note.type,
+        invoiceId=note.invoiceId, initialAmount=note.initialAmount, remainingAmount=note.initialAmount,
+        reason=note.reason, createdAt=datetime.utcnow(), status=models.CreditNoteStatus.ACTIVE
+    )
+    db.add(db_note)
+    db.flush()
+    log_credit_note_action(db, credit_note_id=db_note.id, action=models.CreditNoteAction.CREATED, details=f"Created with initial amount £{note.initialAmount:.2f}.", user=user)
+    db.commit()
+    db.refresh(db_note)
+    return db_note
+
+def void_credit_note(db: Session, note_id: int, user: models.User):
+    note = db.query(models.CreditNote).options(joinedload(models.CreditNote.applications).joinedload(models.CreditNoteApplication.invoice)).filter(models.CreditNote.id == note_id).first()
+    if not note or note.status == models.CreditNoteStatus.VOIDED:
+        return None
+    
+    note.status = models.CreditNoteStatus.VOIDED
+    note.remainingAmount = 0.0
+    
+    affected_invoice_ids = {app.invoice_id for app in note.applications}
+    
+    log_credit_note_action(db, credit_note_id=note_id, action=models.CreditNoteAction.VOIDED, details=f"Note voided. Reverting applications from {len(affected_invoice_ids)} invoices.", user=user)
+    
+    for invoice_id in affected_invoice_ids:
+        recalc_invoice_total(db, invoice_id, user=user)
+
+    db.commit()
+    db.refresh(note)
+    return note
+
+def update_credit_note(db: Session, note_id: int, note_update: schemas.CreditNoteUpdate, user: models.User):
+    note = db.query(models.CreditNote).filter(models.CreditNote.id == note_id).first()
+    if not note: return None
+    
+    if note_update.reason is not None and note_update.reason != note.reason:
+        log_credit_note_action(db, credit_note_id=note_id, action=models.CreditNoteAction.EDITED_REASON, details=f"Reason changed from '{note.reason}' to '{note_update.reason}'.", user=user)
+        note.reason = note_update.reason
+
+    if note_update.remainingAmount is not None and note_update.remainingAmount != note.remainingAmount:
+        old_amount = note.remainingAmount
+        note.remainingAmount = note_update.remainingAmount
+        log_credit_note_action(db, credit_note_id=note_id, action=models.CreditNoteAction.EDITED_BALANCE, details=f"Balance manually adjusted from £{old_amount:.2f} to £{note.remainingAmount:.2f}.", user=user)
+        # Manually updating the balance doesn't trigger invoice recalculations. It's an override.
+        
+    db.commit()
+    db.refresh(note)
+    return note
+
+def manually_apply_credit_to_invoice(db: Session, note_id: int, invoice_id: int, amount: float, user: models.User):
+    note = db.query(models.CreditNote).filter(models.CreditNote.id == note_id).first()
+    invoice = get_invoice(db, invoice_id)
+
+    # Validations
+    if not note or not invoice: return None, "Note or Invoice not found"
+    if note.customerId != invoice.customerId: return None, "Note and Invoice do not belong to the same customer"
+    if note.status != models.CreditNoteStatus.ACTIVE: return None, "Credit note is not active"
+    if amount > note.remainingAmount: return None, "Amount exceeds remaining credit"
+    if amount > invoice.outstandingAmount: return None, "Amount exceeds invoice outstanding balance"
+
+    # Apply credit
+    note.remainingAmount -= amount
+    invoice.credit_applied += amount
+    invoice.outstandingAmount -= amount
+    
+    # Update status
+    if invoice.outstandingAmount <= 0.01:
+        invoice.outstandingAmount = 0
+        invoice.status = models.InvoiceStatus.PAID if invoice.paidAmount > 0 else models.InvoiceStatus.SETTLED_WITH_CREDIT
+    else:
+        invoice.status = models.InvoiceStatus.PARTIALLY_PAID
+
+    # Log application
+    db.add(models.CreditNoteApplication(credit_note_id=note.id, invoice_id=invoice.id, appliedAmount=amount))
+    log_credit_note_action(db, credit_note_id=note.id, action=models.CreditNoteAction.MANUAL_APPLICATION, details=f"Manually applied £{amount:.2f} to invoice {invoice.invoice_ref}.", user=user)
+
+    db.commit()
+    db.refresh(note)
+    db.refresh(invoice)
+    return note, None
+
+
+# Statement of Accounts
+def get_statement_of_accounts(db: Session, customer_id: Optional[int], start_date: Optional[datetime], end_date: Optional[datetime]) -> List[models.Invoice]:
+    query = db.query(models.Invoice).options(joinedload('*')).order_by(models.Invoice.invoiceDate.asc())
+    if customer_id is not None:
+        query = query.filter(models.Invoice.customerId == customer_id)
+    if start_date:
+        query = query.--- START OF FILE backend/routers/credit_notes.txt</file>
+    <description>Enhanced the Credit Notes API with new Super Admin controls. The `PUT` endpoint now allows editing of the `remainingAmount` in addition to the `reason`. A new `POST /apply-manual` endpoint was added for direct, manual application of credit to invoices. Both endpoints are protected and require Super Admin privileges.</description>
+    <content><![CDATA[from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import List
+
+from .. import crud, schemas, models, security
+from ..database import get_db
+
+router = APIRouter(
+    prefix="/credit-notes",
+    tags=["Credit Notes"],
+    dependencies=[Depends(security.get_current_user)],
+)
+
+@router.post("/", response_model=schemas.CreditNote, status_code=201)
+def create_credit_note(
+    note: schemas.CreditNoteCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(security.get_current_user)
+):
+    # Validate customer exists
+    customer = crud.get_customer(db, customer_id=note.customerId)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    
+    # Validate invoice exists if it's a job-based note
+    if note.type == models.CreditNoteType.JOB_BASED and note.invoiceId:
+        invoice = crud.get_invoice(db, invoice_id=note.invoiceId)
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        if invoice.customerId != note.customerId:
+            raise HTTPException(status_code=400, detail="Invoice does not belong to the specified customer")
+
+    return crud.create_credit_note(db=db, note=note, user=current_user)
+
+
+@router.get("/", response_model=List[schemas.CreditNote])
+def read_credit_notes(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    notes = crud.get_credit_notes(db, skip=skip, limit=limit)
+    return notes
+
+@router.put("/{note_id}", response_model=schemas.CreditNote)
+def update_credit_note(
+    note_id: int,
+    note_update: schemas.CreditNoteUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(security.get_current_super_admin)
+):
+    note = crud.update_credit_note(db, note_id, note_update, current_user)
+    if not note:
+        raise HTTPException(status_code=404, detail="Credit note not found")
+    return note
+
+@router.post("/{note_id}/void", response_model=schemas.CreditNote)
+def void_credit_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(security.get_current_super_admin)
+):
+    note = crud.void_credit_note(db, note_id, current_user)
+    if not note:
+        raise HTTPException(status_code=404, detail="Credit note not found or already voided")
+    return note
+
+@router.post("/{note_id}/apply-manual", response_model=schemas.CreditNote)
+def manual_apply_credit(
+    note_id: int,
+    payload: schemas.ManualApplySchema,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(security.get_current_super_admin)
+):
+    note, error_msg = crud.manually_apply_credit_to_invoice(
+        db, note_id, payload.invoice_id, payload.amount, current_user
+    )
+    if error_msg:
+        raise HTTPException(status_code=400, detail=error_msg)
+    if not note:
+        raise HTTPException(status_code=404, detail="Credit note or invoice not found")
+    return note
+]]></content>
+  </change>
+  <change>
+    <file>components/CreditNotesPage.tsx</file>
+    <description>Overhauled Credit Notes page to add Super Admin controls. Added new buttons for "Apply Manually" and an enhanced "Edit" that now supports balance changes. The component now renders new modals (`EditCreditNoteModal` and `ManualApplyCreditModal`) for these actions. All Super Admin controls are hidden from regular admins.</description>
+    <content><![CDATA[import React, { useState, useMemo, Fragment, useEffect } from 'react';
+import { CreditNote, Customer, Invoice, CreditNoteType, CreditNoteFormData, CreditNoteStatus, User, InvoiceStatus } from '../types';
+import { ArrowLeftIcon, ReceiptRefundIcon, PlusIcon, ChevronDownIcon, ChevronUpIcon, PencilIcon, TrashIcon, SparklesIcon } from './icons';
+import { safeDateFormat, safeParseDate } from '../utils/date';
+import EditCreditNoteModal from './EditCreditNoteModal';
+import ManualApplyCreditModal from './ManualApplyCreditModal';
+
+interface CreditNotesPageProps {
+    creditNotes: CreditNote[];
+    customers: Customer[];
+    invoices: Invoice[];
+    onAddCreditNote: (noteData: CreditNoteFormData) => void;
+    onNavigateBack: () => void;
+    onVoidCreditNote: (noteId: number) => void;
+    onEditCreditNote: (noteId: number, data: { reason?: string, remainingAmount?: number }) => void;
+    onManualApplyCredit: (noteId: number, invoiceId: number, amount: number) => void;
+    user: User;
+    tabId: string;
+}
+
+type CreditNotesTab = 'summary' | 'history';
+
+const CreditNotesPage: React.FC<CreditNotesPageProps> = (props) => {
+    const { creditNotes, customers, invoices, onAddCreditNote, onNavigateBack, onVoidCreditNote, onEditCreditNote, onManualApplyCredit, user, tabId } = props;
+
+    const [activeTab, setActiveTab] = useState<CreditNotesTab>('summary');
+    const [formVisible, setFormVisible] = useState(false);
+    const [expandedNoteId, setExpandedNoteId] = useState<number | null>(null);
+    const [editingNote, setEditingNote] = useState<CreditNote | null>(null);
+    const [applyingNote, setApplyingNote] = useState<CreditNote | null>(null);
+
+    // Filters for history tab
+    const [filterCustomerId, setFilterCustomerId] = useState<string>('all');
+    const [filterStartDate, setFilterStartDate] = useState<string>('');
+    const [filterEndDate, setFilterEndDate] = useState<string>('');
+    const [filterSearchTerm, setFilterSearchTerm] = useState<string>('');
+
+    const customersMap = useMemo(() => new Map(customers.map(c => [c.id, c.name])), [customers]);
+    const invoicesMap = useMemo(() => new Map(invoices.map(i => [i.id, i.invoice_ref])), [invoices]);
+    
+    const eligibleInvoicesForApply = useMemo(() => {
+        if (!applyingNote) return [];
+        return invoices.filter(inv => 
+            inv.customerId === applyingNote.customerId &&
+            (inv.status === InvoiceStatus.UNPAID || inv.status === InvoiceStatus.PARTIALLY_PAID)
+        );
+    }, [applyingNote, invoices]);
+
+    const filteredHistoryNotes = useMemo(() => {
+        return creditNotes.filter(note => {
+            if (filterCustomerId !== 'all' && note.customerId !== Number(filterCustomerId)) {
+                return false;
+            }
+            const noteDate = safeParseDate(note.createdAt);
+            if (!noteDate) return false;
+
+            if (filterStartDate) {
+                const startDate = safeParseDate(filterStartDate);
+                if (startDate) {
+                    startDate.setHours(0, 0, 0, 0);
+                    if (noteDate < startDate) return false;
+                }
+            }
+            if (filterEndDate) {
+                const endDate = safeParseDate(filterEndDate);
+                if (endDate) {
+                    endDate.setHours(23, 59, 59, 999);
+                    if (noteDate > endDate) return false;
+                }
+            }
+            
+            if (filterSearchTerm.trim()) {
+                const term = filterSearchTerm.toLowerCase();
+                const customerName = customersMap.get(note.customerId)?.toLowerCase() || '';
+                const invoiceRef = note.invoiceId ? invoicesMap.get(note.invoiceId)?.toLowerCase() : '';
+
+                return (
+                    note.creditNoteRef.toLowerCase().includes(term) ||
+                    customerName.includes(term) ||
+                    note.reason.toLowerCase().includes(term) ||
+                    (invoiceRef && invoiceRef.includes(term)) ||
+                    note.initialAmount.toString().includes(term)
+                );
+            }
+            return true;
+        });
+    }, [creditNotes, filterCustomerId, filterStartDate, filterEndDate, filterSearchTerm, customersMap, invoicesMap]);
+    
+
+    const customerCreditSummary = useMemo(() => {
+        const summary = new Map<number, { name: string, totalCredit: number, remainingCredit: number }>();
+        customers.forEach(c => {
+            summary.set(c.id, { name: c.name, totalCredit: 0, remainingCredit: 0 });
+        });
+        creditNotes.forEach(cn => {
+            if (cn.status === CreditNoteStatus.VOIDED) return;
+            const customerSummary = summary.get(cn.customerId);
+            if (customerSummary) {
+                customerSummary.totalCredit += cn.initialAmount;
+                customerSummary.remainingCredit += cn.remainingAmount;
+            }
+        });
+        return Array.from(summary.values()).filter(s => s.totalCredit > 0).sort((a,b) => b.remainingCredit - a.remainingCredit);
+    }, [creditNotes, customers]);
+
+    const handleClearFilters = () => {
+        setFilterCustomerId('all');
+        setFilterStartDate('');
+        setFilterEndDate('');
+        setFilterSearchTerm('');
+    };
+
+    const handleVoidClick = (noteId: number) => {
+        if (window.confirm("Are you sure you want to void this credit note? This will revert any applications and cannot be undone.")) {
+            onVoidCreditNote(noteId);
+        }
+    };
+    
+    const handleEditSave = (noteId: number, data: { reason: string, remainingAmount: number }) => {
+        onEditCreditNote(noteId, data);
+        setEditingNote(null);
+    }
+    
+    const handleApplySave = (invoiceId: number, amount: number) => {
+        if (applyingNote) {
+            onManualApplyCredit(applyingNote.id, invoiceId, amount);
+        }
+        setApplyingNote(null);
+    }
+
+    const getStatusChip = (status: CreditNoteStatus, remaining: number) => {
+        const baseClasses = "px-2 py-1 text-xs font-semibold rounded-full";
+        if (status === CreditNoteStatus.VOIDED) {
+             return <span className={`${baseClasses} bg-red-100 text-red-800`}>Voided</span>;
+        }
+        if (remaining <= 0.009) {
+             return <span className={`${baseClasses} bg-green-100 text-green-800`}>Depleted</span>;
+        }
+        return <span className={`${baseClasses} bg-yellow-100 text-yellow-800`}>Active</span>;
+    };
+
+
+    return (
+        <div className="p-6 space-y-6 text-black">
+             {editingNote && user.role === 'super_admin' && (
+                <EditCreditNoteModal 
+                    isOpen={!!editingNote}
+                    onClose={() => setEditingNote(null)}
+                    note={editingNote}
+                    onSave={handleEditSave}
+                />
+            )}
+            {applyingNote && user.role === 'super_admin' && (
+                <ManualApplyCreditModal
+                    isOpen={!!applyingNote}
+                    onClose={() => setApplyingNote(null)}
+                    note={applyingNote}
+                    invoices={eligibleInvoicesForApply}
+                    onApply={handleApplySave}
+                />
+            )}
+            <header className="flex items-center space-x-3">
+                <button onClick={onNavigateBack} className="p-2 rounded-full hover:bg-brand-gray-200" aria-label="Go back to Accounts Hub">
+                    <ArrowLeftIcon className="w-5 h-5 text-brand-gray-600" />
+                </button>
+                <ReceiptRefundIcon className="w-8 h-8 text-brand-blue" />
+                <h1 className="text-2xl font-bold text-brand-blue-dark">Credit Notes</h1>
+            </header>
+
+            <div className="border-b border-gray-200">
+                <nav className="-mb-px flex space-x-8" aria-label="Tabs">
+                    <button onClick={() => setActiveTab('summary')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'summary' ? 'border-brand-blue text-brand-blue' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}>Summary & Creation</button>
+                    <button onClick={() => setActiveTab('history')} className={`whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm ${activeTab === 'history' ? 'border-brand-blue text-brand-blue' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}>History & Management</button>
+                </nav>
+            </div>
+
+            {activeTab === 'summary' && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <div className="lg:col-span-2 space-y-6">
+                        <div className="flex justify-end">
+                            <button onClick={() => setFormVisible(!formVisible)} className="flex items-center px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition">
+                                <PlusIcon className="w-5 h-5 mr-2" /> {formVisible ? 'Cancel' : 'Add New Credit Note'}
+                            </button>
+                        </div>
+                        {formVisible && <AddCreditNoteForm customers={customers} invoices={invoices} onAddCreditNote={onAddCreditNote} onDone={() => setFormVisible(false)} tabId={tabId} />}
+                    </div>
+                    <div className="lg:col-span-1">
+                        <div className="bg-brand-gray-50 rounded-lg border border-brand-gray-200 p-4 sticky top-6">
+                            <h2 className="text-lg font-semibold text-brand-blue-dark mb-4">Customer Credit Summary</h2>
+                            <ul className="space-y-3 max-h-[70vh] overflow-y-auto">
+                                {customerCreditSummary.length === 0 && <p className="text-sm text-gray-500">No customers with active credits.</p>}
+                                {customerCreditSummary.map(summary => (
+                                    <li key={summary.name} className="p-3 bg-white rounded-md border">
+                                        <p className="font-semibold text-black">{summary.name}</p>
+                                        <div className="text-sm mt-1">
+                                            <div className="flex justify-between"><span>Total Issued:</span> <span>£{summary.totalCredit.toFixed(2)}</span></div>
+                                            <div className="flex justify-between font-bold text-green-600"><span>Available:</span> <span>£{summary.remainingCredit.toFixed(2)}</span></div>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            )}
+            
+            {activeTab === 'history' && (
+                <div className="space-y-6">
+                    <section className="p-6 bg-brand-gray-50 rounded-lg border border-brand-gray-200">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                            <div className="md:col-span-1">
+                                <label className="text-sm font-medium text-gray-600">Customer</label>
+                                <select value={filterCustomerId} onChange={e => setFilterCustomerId(e.target.value)} className="mt-1 w-full p-2 border rounded-md">
+                                    <option value="all">All Customers</option>
+                                    {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-gray-600">Date From</label>
+                                <input type="date" value={filterStartDate} onChange={e => setFilterStartDate(e.target.value)} className="mt-1 w-full p-2 border rounded-md"/>
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-gray-600">Date To</label>
+                                <input type="date" value={filterEndDate} onChange={e => setFilterEndDate(e.target.value)} className="mt-1 w-full p-2 border rounded-md"/>
+                            </div>
+                             <div>
+                                <label className="text-sm font-medium text-gray-600">Search Ref/Reason</label>
+                                <input type="text" value={filterSearchTerm} onChange={e => setFilterSearchTerm(e.target.value)} className="mt-1 w-full p-2 border rounded-md" placeholder="e.g., CN-123456 or damage"/>
+                            </div>
+                        </div>
+                        <div className="flex justify-end mt-4">
+                            <button onClick={handleClearFilters} className="px-4 py-2 bg-gray-500 text-white rounded-md hover:bg-gray-600 transition text-sm">Clear Filters</button>
+                        </div>
+                    </section>
+
+                    <div className="bg-white rounded-lg shadow-md">
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full bg-white text-sm">
+                                <thead className="bg-brand-gray-50 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                                    <tr>
+                                        <th className="p-3"></th>
+                                        {['Ref', 'Customer', 'Date', 'Reason', 'Issued For', 'Initial Amt', 'Remaining', 'Status', 'Actions'].map(header => (
+                                            <th key={header} className="p-3">{header}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-200">
+                                    {filteredHistoryNotes.length === 0 && (
+                                        <tr><td colSpan={10} className="text-center p-8 text-gray-500">No credit notes match the selected criteria.</td></tr>
+                                    )}
+                                    {filteredHistoryNotes.map(note => (
+                                        <Fragment key={note.id}>
+                                            <tr className="hover:bg-gray-50">
+                                                <td className="p-3">
+                                                    <button onClick={() => setExpandedNoteId(expandedNoteId === note.id ? null : note.id)} aria-expanded={expandedNoteId === note.id} aria-controls={`details-${note.id}`} aria-label="Show details">
+                                                        {expandedNoteId === note.id ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
+                                                    </button>
+                                                </td>
+                                                <td className="p-3 font-mono text-brand-blue">{note.creditNoteRef}</td>
+                                                <td className="p-3 font-medium text-black">{customersMap.get(note.customerId) || 'Unknown'}</td>
+                                                <td className="p-3 text-black">{safeDateFormat(note.createdAt)}</td>
+                                                <td className="p-3 text-black truncate" style={{maxWidth: '200px'}} title={note.reason}>{note.reason}</td>
+                                                <td className="p-3 text-black">{note.type === CreditNoteType.JOB_BASED && note.invoiceId ? invoicesMap.get(note.invoiceId) : 'Account'}</td>
+                                                <td className="p-3 text-black">£{note.initialAmount.toFixed(2)}</td>
+                                                <td className="p-3 text-black font-semibold">£{note.remainingAmount.toFixed(2)}</td>
+                                                <td className="p-3">{getStatusChip(note.status, note.remainingAmount)}</td>
+                                                <td className="p-3">
+                                                    {user.role === 'super_admin' && (
+                                                        <div className="flex items-center space-x-2">
+                                                            <button onClick={() => setApplyingNote(note)} disabled={note.status !== CreditNoteStatus.ACTIVE || note.remainingAmount <= 0} className="p-1 text-green-600 hover:text-green-800 disabled:text-gray-400" title="Apply Manually"><SparklesIcon className="w-4 h-4" /></button>
+                                                            <button onClick={() => setEditingNote(note)} disabled={note.status === CreditNoteStatus.VOIDED} className="p-1 text-blue-600 hover:text-blue-800 disabled:text-gray-400" title="Edit Note"><PencilIcon className="w-4 h-4" /></button>
+                                                            <button onClick={() => handleVoidClick(note.id)} disabled={note.status === CreditNoteStatus.VOIDED} className="p-1 text-red-600 hover:text-red-800 disabled:text-gray-400" title="Void Note"><TrashIcon className="w-4 h-4" /></button>
+                                                        </div>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                            {expandedNoteId === note.id && (
+                                                <tr id={`details-${note.id}`}>
+                                                    <td colSpan={10} className="p-4 bg-brand-gray-50">
+                                                        <h4 className="font-semibold mb-2 text-gray-800">Note History:</h4>
+                                                        {note.history.length > 0 ? (
+                                                            <ul className="list-disc pl-5 text-xs space-y-1">
+                                                                {note.history.map((item, index) => (
+                                                                    <li key={index}><span className="font-mono bg-gray-200 px-1.5 py-0.5 rounded text-gray-700">{safeDateFormat(item.date, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span> - <strong>{item.action.replace(/_/g, ' ')}</strong>: {item.details}</li>
+                                                                ))}
+                                                                {note.applications.map((app, index) => (
+                                                                    <li key={`app-${index}`}><span className="font-mono bg-gray-200 px-1.5 py-0.5 rounded text-gray-700">{safeDateFormat(app.date, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span> - <strong>APPLIED</strong>: Applied £{app.appliedAmount.toFixed(2)} to Invoice {invoicesMap.get(app.invoiceId) || 'N/A'}</li>
+                                                                ))}
+                                                            </ul>
+                                                        ) : <p className="text-xs text-gray-500">No history available for this note.</p>}
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// Add Credit Note Form Component
+interface AddCreditNoteFormProps {
+    customers: Customer[];
+    invoices: Invoice[];
+    onAddCreditNote: (data: CreditNoteFormData) => void;
+    onDone: () => void;
+    tabId: string;
+}
+
+const initialFormState = {
+    type: CreditNoteType.JOB_BASED,
+    customerId: '' as number | '',
+    invoiceId: '' as number | '',
+    initialAmount: '',
+    reason: '',
+};
+
+const AddCreditNoteForm: React.FC<AddCreditNoteFormProps> = ({ customers, invoices, onAddCreditNote, onDone, tabId }) => {
+    const storageKey = `creditNoteFormState-${tabId}`;
+    const [formData, setFormData] = useState(() => {
+        const savedData = localStorage.getItem(storageKey);
+        return savedData ? JSON.parse(savedData) : initialFormState;
+    });
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        localStorage.setItem(storageKey, JSON.stringify(formData));
+    }, [formData, storageKey]);
+
+    const handleChange = (field: keyof typeof initialFormState, value: any) => {
+        setFormData(prev => ({ ...prev, [field]: value }));
+    };
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        const amount = parseFloat(formData.initialAmount);
+        if (!formData.customerId || isNaN(amount) || amount <= 0 || !formData.reason.trim()) {
+            setError('Please fill all fields with valid data.');
+            return;
+        }
+        if (formData.type === CreditNoteType.JOB_BASED && !formData.invoiceId) {
+            setError('Please select an invoice for a job-based credit note.');
+            return;
+        }
+        onAddCreditNote({
+            customerId: formData.customerId,
+            type: formData.type,
+            invoiceId: formData.type === CreditNoteType.JOB_BASED ? formData.invoiceId || undefined : undefined,
+            initialAmount: amount,
+            reason: formData.reason,
+        });
+        localStorage.removeItem(storageKey);
+        onDone();
+    };
+
+    const customerInvoices = useMemo(() => {
+        if (!formData.customerId) return [];
+        return invoices.filter(i => i.customerId === formData.customerId).sort((a,b) => (safeDateFormat(b.invoiceDate) || '').localeCompare(safeDateFormat(a.invoiceDate) || ''));
+    }, [formData.customerId, invoices]);
+
+    return (
+        <form onSubmit={handleSubmit} className="p-6 bg-white rounded-lg shadow-md border space-y-4">
+            <p className="text-sm text-gray-500">
+                Example: 'Job-based: Credit £250.00 for invoice ALS-077014 due to damaged goods' or 'Account-based: Credit £500.00 to Fresh Produce Co. for service credits'
+            </p>
+            {error && <p className="text-sm text-red-600 bg-red-50 p-2 rounded-md">{error}</p>}
+            <div className="flex items-center space-x-4">
+                <label className="flex items-center"><input type="radio" value={CreditNoteType.JOB_BASED} checked={formData.type === CreditNoteType.JOB_BASED} onChange={() => handleChange('type', CreditNoteType.JOB_BASED)} className="mr-2"/> Job-based</label>
+                <label className="flex items-center"><input type="radio" value={CreditNoteType.ACCOUNT_BASED} checked={formData.type === CreditNoteType.ACCOUNT_BASED} onChange={() => { handleChange('type', CreditNoteType.ACCOUNT_BASED); handleChange('invoiceId', ''); }} className="mr-2"/> Account-based</label>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label className="text-sm font-medium">Customer</label>
+                    <select value={formData.customerId} onChange={e => { handleChange('customerId', Number(e.target.value)); handleChange('invoiceId', ''); }} className="mt-1 w-full p-2 border rounded-md" required>
+                        <option value="" disabled>Select a customer...</option>
+                        {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                </div>
+                {formData.type === CreditNoteType.JOB_BASED && (
+                     <div>
+                        <label className="text-sm font-medium">Invoice</label>
+                        <select value={formData.invoiceId} onChange={e => handleChange('invoiceId', Number(e.target.value))} className="mt-1 w-full p-2 border rounded-md" required disabled={!formData.customerId}>
+                            <option value="" disabled>Select an invoice...</option>
+                            {customerInvoices.map(i => <option key={i.id} value={i.id}>{i.invoice_ref} ({i.jobDetails.awbRef}) - £{i.totalAmount.toFixed(2)}</option>)}
+                        </select>
+                    </div>
+                )}
+                <div>
+                    <label className="text-sm font-medium">Amount (£)</label>
+                    <input type="number" step="0.01" min="0.01" value={formData.initialAmount} onChange={e => handleChange('initialAmount', e.target.value)} className="mt-1 w-full p-2 border rounded-md" placeholder="e.g., 250.00" required />
+                </div>
+                <div className="md:col-span-2">
+                    <label className="text-sm font-medium">Reason</label>
+                    <input type="text" value={formData.reason} onChange={e => handleChange('reason', e.target.value)} className="mt-1 w-full p-2 border rounded-md" placeholder="e.g., Credit for damaged goods" required />
+                </div>
+            </div>
+            <div className="flex justify-end">
+                <button type="submit" className="flex items-center px-4 py-2 bg-brand-blue text-white rounded-md hover:bg-brand-blue-light transition">
+                    Create Credit Note
+                </button>
+            </div>
+        </form>
+    );
+};
+
+export default CreditNotesPage;
+]]></content>
+  </change>
+  <change>
+    <file>components/EditCreditNoteModal.tsx</file>
+    <description>Created a new modal component for Super Admins to edit credit notes. This modal allows modification of both the `reason` and the `remainingAmount`, providing advanced control over credit balances. The component includes validation to ensure the new balance is a valid number.</description>
+    <content><![CDATA[import React, { useState, useEffect } from 'react';
+import { CreditNote } from '../types';
+import { XMarkIcon, SaveIcon } from './icons';
+
+interface EditCreditNoteModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+    note: CreditNote;
+    onSave: (noteId: number, data: { reason: string, remainingAmount: number }) => void;
+}
+
+const EditCreditNoteModal: React.FC<EditCreditNoteModalProps> = ({ isOpen, onClose, note, onSave }) => {
+    const [reason, setReason] = useState(note.reason);
+    const [remainingAmount, setRemainingAmount] = useState(note.remainingAmount.toFixed(2));
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        setReason(note.reason);
+        setRemainingAmount(note.remainingAmount.toFixed(2));
+        setError('');
+    }, [note]);
+
+    if (!isOpen) return null;
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        const amount = parseFloat(remainingAmount);
+        if (isNaN(amount) || amount < 0) {
+            setError('Please enter a valid, non-negative amount.');
+            return;
+        }
+        onSave(note.id, { reason, remainingAmount: amount });
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex items-center justify-center p-4" aria-modal="true" role="dialog">
+            <div className="bg-white rounded-lg shadow-2xl w-full max-w-md transform transition-all">
+                <div className="flex justify-between items-center p-4 border-b">
+                    <h2 className="text-lg font-semibold text-brand-blue-dark">Edit Credit Note {note.creditNoteRef}</h2>
+                    <button onClick={onClose} className="p-1 rounded-full hover:bg-gray-200" aria-label="Close">
+                        <XMarkIcon className="w-6 h-6 text-gray-600" />
+                    </button>
+                </div>
+                <form onSubmit={handleSubmit}>
+                    <div className="p-6 space-y-4">
+                        <div>
+                            <label htmlFor="edit-cn-reason" className="block text-sm font-medium text-gray-700">Reason</label>
+                            <input
+                                id="edit-cn-reason"
+                                type="text"
+                                value={reason}
+                                onChange={e => setReason(e.target.value)}
+                                className="mt-1 w-full p-2 border rounded-md"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="edit-cn-amount" className="block text-sm font-medium text-gray-700">Remaining Amount (£)</label>
+                            <input
+                                id="edit-cn-amount"
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={remainingAmount}
+                                onChange={e => setRemainingAmount(e.target.value)}
+                                className="mt-1 w-full p-2 border rounded-md"
+                                required
+                            />
+                        </div>
+                        {error && <p className="text-sm text-red-600">{error}</p>}
+                    </div>
+                    <div className="bg-gray-50 px-4 py-3 sm:px-6 flex justify-end space-x-3">
+                        <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 text-sm font-medium rounded-md hover:bg-gray-300">
+                            Cancel
+                        </button>
+                        <button type="submit" className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-brand-blue hover:bg-brand-blue-light">
+                            <SaveIcon className="w-5 h-5 mr-2" />
+                            Save Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+export default EditCreditNoteModal;
+]]></content>
+  </change>
+  <change>
+    <file>components/ManualApplyCreditModal.tsx</file>
+    <description>Created a new modal component for Super Admins to manually apply credit notes to invoices. The modal allows selecting an eligible (unpaid/partially paid) invoice and specifying the exact amount of credit to apply, with validation to prevent over-application.</description>
+    <content><![CDATA[import React, { useState, useEffect } from 'react';
+import { CreditNote, Invoice } from '../types';
+import { XMarkIcon, SparklesIcon } from './icons';
+
+interface ManualApplyCreditModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+    note: CreditNote;
+    invoices: Invoice[];
+    onApply: (invoiceId: number, amount: number) => void;
+}
+
+const ManualApplyCreditModal: React.FC<ManualApplyCreditModalProps> = ({ isOpen, onClose, note, invoices, onApply }) => {
+    const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>('');
+    const [amount, setAmount] = useState<string>('');
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+        setSelectedInvoiceId('');
+        setAmount('');
+        setError('');
+    }, [note]);
+
+    if (!isOpen) return null;
+    
+    const selectedInvoice = invoices.find(inv => inv.id === Number(selectedInvoiceId));
+    const maxAmount = Math.min(note.remainingAmount, selectedInvoice?.outstandingAmount || 0);
+
+    const handleSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        const applyAmount = parseFloat(amount);
+
+        if (!selectedInvoiceId || isNaN(applyAmount) || applyAmount <= 0) {
+            setError('Please select an invoice and enter a valid positive amount.');
+            return;
+        }
+        if (applyAmount > maxAmount) {
+            setError(`Amount cannot exceed the available credit (£${note.remainingAmount.toFixed(2)}) or the invoice outstanding balance (£${selectedInvoice?.outstandingAmount.toFixed(2)}).`);
+            return;
+        }
+
+        onApply(Number(selectedInvoiceId), applyAmount);
+    };
+    
+    const handleInvoiceChange = (invoiceId: string) => {
+        setSelectedInvoiceId(invoiceId);
+        const inv = invoices.find(i => i.id === Number(invoiceId));
+        if(inv) {
+            setAmount(Math.min(note.remainingAmount, inv.outstandingAmount).toFixed(2));
+        }
+    }
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex items-center justify-center p-4" aria-modal="true" role="dialog">
+            <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg transform transition-all">
+                <div className="flex justify-between items-center p-4 border-b">
+                    <h2 className="text-lg font-semibold text-brand-blue-dark">Manually Apply Credit: {note.creditNoteRef}</h2>
+                    <button onClick={onClose} className="p-1 rounded-full hover:bg-gray-200" aria-label="Close">
+                        <XMarkIcon className="w-6 h-6 text-gray-600" />
+                    </button>
+                </div>
+                <form onSubmit={handleSubmit}>
+                    <div className="p-6 space-y-4">
+                        <p className="text-sm">Available Credit: <span className="font-bold text-green-600">£{note.remainingAmount.toFixed(2)}</span></p>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label htmlFor="apply-cn-invoice" className="block text-sm font-medium text-gray-700">Apply to Invoice</label>
+                                <select
+                                    id="apply-cn-invoice"
+                                    value={selectedInvoiceId}
+                                    onChange={e => handleInvoiceChange(e.target.value)}
+                                    className="mt-1 w-full p-2 border rounded-md"
+                                    required
+                                >
+                                    <option value="" disabled>Select an invoice...</option>
+                                    {invoices.map(inv => (
+                                        <option key={inv.id} value={inv.id}>
+                                            {inv.invoice_ref} ({inv.jobDetails.awbRef}) - Outstanding £{inv.outstandingAmount.toFixed(2)}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label htmlFor="apply-cn-amount" className="block text-sm font-medium text-gray-700">Amount to Apply (£)</label>
+                                <input
+                                    id="apply-cn-amount"
+                                    type="number"
+                                    step="0.01"
+                                    min="0.01"
+                                    max={maxAmount.toFixed(2)}
+                                    value={amount}
+                                    onChange={e => setAmount(e.target.value)}
+                                    className="mt-1 w-full p-2 border rounded-md"
+                                    required
+                                    disabled={!selectedInvoiceId}
+                                />
+                            </div>
+                        </div>
+                        {error && <p className="text-sm text-red-600 p-2 bg-red-50 rounded-md">{error}</p>}
+                        {invoices.length === 0 && <p className="text-sm text-gray-500">This customer has no outstanding invoices to apply credit to.</p>}
+                    </div>
+                    <div className="bg-gray-50 px-4 py-3 sm:px-6 flex justify-end space-x-3">
+                        <button type="button" onClick={onClose} className="px-4 py-2 bg-gray-200 text-gray-800 text-sm font-medium rounded-md hover:bg-gray-300">
+                            Cancel
+                        </button>
+                        <button type="submit" disabled={invoices.length === 0} className="inline-flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-brand-blue hover:bg-brand-blue-light disabled:bg-gray-400">
+                            <SparklesIcon className="w-5 h-5 mr-2" />
+                            Apply Credit
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+export default ManualApplyCreditModal;
+]]></content>
+  </change>
+</changes>

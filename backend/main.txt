@@ -1,0 +1,51 @@
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+from backend import models
+from backend.database import engine
+from .routers import jobs, invoices, payments, backup, auth, credit_notes, accounts, testing, settings, customers, drivers, tasks
+
+# This command is now handled by Alembic. It can be removed or kept for initial setup without Alembic.
+# For production, rely on `alembic upgrade head`.
+# models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="Logistics & Invoice CMS API",
+    description="API for managing logistics jobs, invoices, and payments.",
+    version="5.0.0",
+)
+
+# CORS (Cross-Origin Resource Sharing)
+origins = [
+    "http://localhost",
+    "http://localhost:8080",
+    "http://localhost:5173", # Default Vite dev server port
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Allow all origins for simplicity in development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include API routers
+app.include_router(auth.router)
+app.include_router(customers.router)
+app.include_router(drivers.router)
+app.include_router(jobs.router)
+app.include_router(invoices.router)
+app.include_router(payments.router)
+app.include_router(backup.router)
+app.include_router(credit_notes.router)
+app.include_router(accounts.router)
+app.include_router(testing.router)
+app.include_router(settings.router)
+app.include_router(tasks.router)
+
+
+@app.get("/", tags=["Root"])
+def read_root():
+    return {"message": "Welcome to the Logistics & Invoice CMS API"}

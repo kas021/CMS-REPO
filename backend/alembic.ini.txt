@@ -1,0 +1,128 @@
+[alembic]
+# A path to the Alembic script directory, relative to the current path.
+script_location = alembic
+
+# A list of comma-separated migration version locations, relative to the
+# script_location. If omitted, "versions" is used.
+# version_locations = %(here)s/bar:%(here)s/baz
+
+# A file encoding for migration scripts.
+# file_encoding = utf-8
+
+# The name of the template used to generate new revision files.
+# This is a package-relative path.
+# revision_template = default
+
+# A regular expression used to validate new revision file names.
+# If the generated revision file name does not match this expression,
+# an error is raised.
+# revision_name_format = ^[a-f0-9]+$
+
+# Whether to output all Alembic log output to STDOUT.
+# A value of `true` is equivalent to setting `handlers = stdout`
+# in the `[logger_alembic]` section.
+# stdout_log = false
+
+# The default output encoding for all operations.
+# output_encoding = utf-8
+
+# The transaction-per-migration flag, when set to `true`, wraps each
+# migration script in a transaction. This is the default setting.
+# transactional_ddl = false
+
+# A URL to connect to the database.  The format is described at
+# https://docs.sqlalchemy.org/en/20/core/engines.html#database-urls
+# The special form `driver://user:pass@host/dbname` is present for
+# compatibility with prior versions of Alembic.
+#
+# This value may be overridden by the -x command line option
+# or the sqlalchemy.url script running environment variable.
+#
+# This entry is read by the `env.py` script.
+sqlalchemy.url = postgresql://user:password@localhost/dbname
+
+
+[post_write_hooks]
+# This section defines scripts or Python functions that are run
+# on the migration file after it's generated.
+#
+# The key is a name for the hook, which is referenced by the
+# `hooks` option below.
+#
+# The `type` option is the type of hook, can be `exec` (a script)
+# or `py_fn` (a Python function).
+#
+# `entrypoint` is the path to the script or the Python function
+# to be executed.
+#
+# `options` is a comma-separated list of arguments to be passed
+# to the script or function.
+#
+# For `exec` hooks, the migration file path is passed as the
+# first argument to the script.
+#
+# For `py_fn` hooks, the function is called with the migration
+# file path as the first argument, and the rest of the arguments
+# are passed as strings.
+#
+# To use a post write hook, add its name to the `hooks` option.
+# hooks = autopep8, my_hook
+#
+# [post_write_hooks.my_hook]
+# type = py_fn
+# entrypoint = my.package:my_hook
+# options = foo, bar
+#
+# [post_write_hooks.autopep8]
+# type = exec
+# entrypoint = autopep8
+# options = -i
+
+[logging]
+# This section configures the loggers used by Alembic.
+#
+# The keys are the names of the loggers, and the values are the
+# configuration for each logger.
+#
+# The `level` option is the logging level, can be `DEBUG`, `INFO`,
+# `WARN`, `ERROR`, `CRITICAL`.
+#
+# The `handlers` option is a comma-separated list of handlers
+# to be used by the logger.
+#
+# The `qualname` option is the name of the logger in the Python
+# logging hierarchy.
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S

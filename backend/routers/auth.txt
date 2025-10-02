@@ -1,0 +1,111 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+from typing import List
+
+from .. import crud, models, schemas, security
+from ..database import get_db
+import os
+
+router = APIRouter(
+    tags=["Authentication"],
+)
+
+# Hardcoded Super Admin credentials (should be in env variables in production)
+SUPER_ADMIN_USERNAME = os.getenv("SUPER_ADMIN_USERNAME", "sadmin")
+SUPER_ADMIN_PASSWORD = os.getenv("SUPER_ADMIN_PASSWORD", "London777")
+
+@router.post("/token", response_model=schemas.Token)
+def login_for_access_token(db: Session = Depends(get_db), form_data: OAuth2PasswordRequestForm = Depends()):
+    user = None
+    role = None
+
+    # 1. Check for Super Admin
+    if form_data.username == SUPER_ADMIN_USERNAME:
+        if form_data.password == SUPER_ADMIN_PASSWORD:
+            role = "super_admin"
+            user_for_token = schemas.User(id=0, username=SUPER_ADMIN_USERNAME, role=models.UserRole.SUPER_ADMIN)
+        else:
+             raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    else:
+        # 2. Check for normal admin in DB
+        db_user = crud.get_user_by_username(db, username=form_data.username)
+        if not db_user or not security.verify_password(form_data.password, db_user.password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        role = "admin"
+        user_for_token = schemas.User.from_orm(db_user)
+
+    # 3. Create and return token
+    access_token = security.create_access_token(
+        data={"sub": form_data.username, "role": role}
+    )
+    return {"access_token": access_token, "token_type": "bearer", "user": user_for_token}
+
+@router.get("/users/me", response_model=schemas.User)
+def read_users_me(current_user: models.User = Depends(security.get_current_user)):
+    return current_user
+
+@router.get("/users/", response_model=List[schemas.User])
+def read_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db), current_user: models.User = Depends(security.get_current_super_admin)):
+    users = crud.get_users(db, skip=skip, limit=limit)
+    return users
+
+@router.post("/users/", response_model=schemas.User, status_code=status.HTTP_201_CREATED)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db), current_user: models.User = Depends(security.get_current_super_admin)):
+    db_user = crud.get_user_by_username(db, username=user.username)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    if user.username == SUPER_ADMIN_USERNAME:
+        raise HTTPException(status_code=400, detail="Cannot create user with super admin username")
+    return crud.create_user(db=db, user=user)
+
+@router.put("/users/{user_id}", response_model=schemas.User)
+def update_user(user_id: int, user_update: schemas.UserUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(security.get_current_super_admin)):
+    db_user_to_update = crud.get_user(db, user_id=user_id)
+    if not db_user_to_update:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Prevent modification of the hardcoded super admin, which shouldn't even be in the DB.
+    # This is a safeguard.
+    if db_user_to_update.username == SUPER_ADMIN_USERNAME:
+         raise HTTPException(status_code=403, detail="Cannot modify the super admin account.")
+
+    # Check for username conflict if username is being changed
+    if user_update.username:
+        existing_user = crud.get_user_by_username(db, username=user_update.username)
+        if existing_user and existing_user.id != user_id:
+            raise HTTPException(status_code=400, detail="Username already in use.")
+
+    updated_user = crud.update_user(db=db, user_id=user_id, user_update=user_update)
+    if updated_user is None:
+        # This case should be caught by earlier checks, but is here for safety
+        raise HTTPException(status_code=404, detail="User not found or cannot be updated.")
+        
+    return updated_user
+
+@router.delete("/users/{user_id}", response_model=schemas.User)
+def delete_user(user_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(security.get_current_super_admin)):
+    db_user = crud.delete_user(db, user_id=user_id)
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return db_user
+
+@router.put("/users/me/password", response_model=schemas.User)
+def update_password(password_update: schemas.UserCreate, db: Session = Depends(get_db), current_user: models.User = Depends(security.get_current_user)):
+    # Super admin password is not in DB and cannot be changed via API
+    if current_user.username == SUPER_ADMIN_USERNAME:
+        raise HTTPException(status_code=403, detail="Super admin password cannot be changed via the API.")
+        
+    db_user = crud.get_user(db, current_user.id)
+    if not db_user:
+         raise HTTPException(status_code=404, detail="User not found")
+         
+    return crud.update_user_password(db=db, user=db_user, new_password=password_update.password)
