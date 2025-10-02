@@ -25,6 +25,7 @@ def create_access_token(
     subject_id: Optional[int] = None,
     expires_delta: Optional[timedelta] = None,
 ) -> str:
+
     if expires_delta is None:
         expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode = {
@@ -34,6 +35,7 @@ def create_access_token(
     }
     if subject_id is not None:
         to_encode["sub_id"] = subject_id
+
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 

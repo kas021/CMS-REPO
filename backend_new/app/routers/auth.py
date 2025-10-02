@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
@@ -33,6 +34,7 @@ def login_for_access_token(
     return AdminToken(access_token=access_token, expires_at=expires_at)
 
 
+
 @router.post("/drivers/login", response_model=DriverToken, summary="Driver login")
 def driver_login(
     form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
@@ -52,3 +54,4 @@ def driver_login(
         expires_delta=access_token_expires,
     )
     return DriverToken(access_token=access_token, expires_at=expires_at)
+
